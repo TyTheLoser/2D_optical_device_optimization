@@ -7,7 +7,8 @@ import numpy as np
 import scipy as sp
 from matplotlib import pyplot as plt
 
-from utils.utils_free_form_prism_design import calculate_refraction_vector, binary_search,calculate_reflection_vector,calculate_line_surface_intersection_points_by_binary_search,calculate_ray_plane_intersections
+from utils.utils_free_form_prism_design import calculate_refraction_vector, binary_search,calculate_reflection_vector,\
+    calculate_line_surface_intersection_points_by_binary_search,calculate_ray_plane_intersections,filter_rays_by_boundary
 from scipy.spatial.transform import Rotation as R
 
 def is_pure_rotation(matrix):
@@ -1072,13 +1073,21 @@ class GLASS(PMMA):
         self.n3=1
 
 class LC_device(BFP):
-    def __init__(self,up_surface_params,down_surface_params):
+    def __init__(self,up_surface_params,down_surface_params,bound=[11.2,1],OptEl_to_world_translation_matrix=np.zeros((3,1)),\
+                 OptEl_to_world_rotation_matrix=np.array([[1,0,0],[0,1,0],[0,0,1]])):
         super().__init__()
         self.n1 = 1  # 入射空间的折射率
         self.n2 = 1.49  # 自身的折射率
         self.n3 = 1  # 出射空间的折射率
         self.up_surface_params = up_surface_params
         self.down_surface_params = down_surface_params
+        self.bound_x = bound[0]
+        self.bound_y = bound[1]
+        
+        self.OptEl_to_world_translation_matrix = OptEl_to_world_translation_matrix  
+        self.OptEl_to_world_rotation_matrix = OptEl_to_world_rotation_matrix
+        self.world_to_OptEl_translation_matrix = -self.OptEl_to_world_translation_matrix  # 光学器件的平移矩阵
+        self.world_to_OptEl_rotation_matrix = self.OptEl_to_world_rotation_matrix.T  # 光学器件的旋转矩阵
     def up_surface_fun(self, x, y):
         """
         上侧 LC 的函数表达式
@@ -1183,12 +1192,19 @@ class LC_device(BFP):
 
         gradient = np.vstack((-dz_dx, -dz_dy, np.ones_like(x) * dir))
         return gradient
-    def plot_OptEl(self, ax):
-        # 定义 -11 到 11 的 x, y 区域
-        x_count, y_count = 20, 20
-        x = np.linspace(-11, 11, x_count)  # x 方向 100 个点
-        y = np.linspace(-11, 11, y_count)  # y 方向 100 个点
-        x, y = np.meshgrid(x, y)  # 创建网格
+    def plot_OptEl(self, ax, resolution=20):
+        """
+        在给定的3D坐标轴上绘制光学元件的表面。
+
+        :param ax: Matplotlib 的 3D 坐标轴对象。
+        :param x_range: tuple, X方向的绘图范围 (min, max)。
+        :param y_range: tuple, Y方向的绘图范围 (min, max)。
+        :param resolution: int, 每个方向上的网格点数（精度）。
+        """
+        # 使用传入的参数来定义 x, y 区域
+        x = np.linspace(0,self.bound_x, resolution)
+        y = np.linspace(0,self.bound_y, resolution)
+        x, y = np.meshgrid(x, y) # 创建网格
 
         # 计算对应的 z 值
         up_surface_z = self.up_surface_fun(x, y)
@@ -1201,14 +1217,14 @@ class LC_device(BFP):
         down_surface_points_transformed = self.OptEl_coordinate_to_world_coordinate(down_surface_points, False)
         # 先绘制自由曲面
         ax.plot_surface(
-            up_surface_points_transformed[0, :].reshape(x_count, y_count),
-            up_surface_points_transformed[1, :].reshape(x_count, y_count),
-            up_surface_points_transformed[2, :].reshape(x_count, y_count),
+            up_surface_points_transformed[0, :].reshape(resolution, resolution),
+            up_surface_points_transformed[1, :].reshape(resolution, resolution),
+            up_surface_points_transformed[2, :].reshape(resolution, resolution),
             cmap='viridis', edgecolor='none')
         ax.plot_surface(
-            down_surface_points_transformed[0, :].reshape(x_count, y_count),
-            down_surface_points_transformed[1, :].reshape(x_count, y_count),
-            down_surface_points_transformed[2, :].reshape(x_count, y_count),
+            down_surface_points_transformed[0, :].reshape(resolution, resolution),
+            down_surface_points_transformed[1, :].reshape(resolution, resolution),
+            down_surface_points_transformed[2, :].reshape(resolution, resolution),
             cmap='viridis', edgecolor='none')
     def trace_ray(self, p_wcs, n_wcs):
         """
@@ -1217,39 +1233,87 @@ class LC_device(BFP):
         :param n_wcs:
         :return:
         """
+        num_rays_initial = p_wcs.shape[1]
+    
+        # 坐标变换
         pl0_bcs = self.world_coordinate_to_OptEl_coordinate(p_wcs)
-        # n0_bcs = self.world_coordinate_to_bi_prism_coordinate(n_wcs, True)
         n1_bcs = self.world_coordinate_to_OptEl_coordinate(n_wcs, True)
 
-        # ======================================================================
-        # 计算和第一个面的交点坐标
-        _, pl1_bcs = calculate_line_surface_intersection_points_by_binary_search(
-            pl0_bcs, n1_bcs, self.down_surface_fun,min_range=0,max_range=1)
-        n_LC_down_side = self.down_surface_gradient_fun(pl1_bcs[0, :], pl1_bcs[1, :], )
-        # --------------------------------------------------------------------
-        # 计算 pl1_bcs 点处的折射光线的方向向量
-        n2_bcs = calculate_refraction_vector(
-            n_1=self.n1, incident_direction=n1_bcs, n_2=self.n2,
-            normal_direction=n_LC_down_side)
-        # ------------------------------------------------------------------------
-        # 计算和第二个面的交点坐标
-        _,pl2_bcs = calculate_line_surface_intersection_points_by_binary_search(
-            pl1_bcs, n2_bcs, self.up_surface_fun,min_range=0,max_range=1)
-        n_LC_up_side = self.up_surface_gradient_fun(pl2_bcs[0, :], pl2_bcs[1, :], )
-        # print(pl2_bcs)
-        # -----------------------------------------------------------------
-        # 计算 pl2_wcs 点处的折射光线的方向向量
-        n_aabb = np.array([0, 0, 1]).reshape((3, 1))
-        n3_bcs = calculate_reflection_vector(
-            incident_direction=n2_bcs, normal_direction=n_LC_up_side)
-        # ------------------------------------------------------------------------
-        # 将对应的棱镜坐标系的出射点及出射方向
-        # 的向量转换为世界坐标系下的向量
-        pl1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_bcs)
-        pl2_wcs = self.OptEl_coordinate_to_world_coordinate(pl2_bcs)
-        n2_wcs = self.OptEl_coordinate_to_world_coordinate(n2_bcs, True)
-        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_bcs, True)
-        return pl2_wcs, n3_wcs, pl1_wcs, n2_wcs
+        # ====================================================================
+        # 第一步: 计算与第一个面的交点并进行第一次筛选
+        # ====================================================================
+        _, pl1_bcs_all = calculate_line_surface_intersection_points_by_binary_search(
+            pl0_bcs, n1_bcs, self.down_surface_fun, min_range=-100, max_range=100
+        )
+        
+        # 筛选通过第一个边界的光线
+        pl1_after_filter1, (n1_after_filter1,), mask1 = filter_rays_by_boundary(
+            pl1_bcs_all, (0, self.bound_x), (0, self.bound_y), n1_bcs
+        )
+
+        if pl1_after_filter1.shape[1] == 0:
+            print("Warning: No rays hit the valid area of the first surface.")
+            # 返回空的数组和一个全为False的掩码
+            empty_arr = np.array([]).reshape(3, 0)
+            final_mask = np.full(num_rays_initial, False, dtype=bool)
+            return empty_arr, empty_arr, empty_arr, empty_arr, final_mask
+
+        # 计算第一次折射
+        n_LC_down_side = self.down_surface_gradient_fun(pl1_after_filter1[0, :], pl1_after_filter1[1, :])
+        n2_after_filter1 = calculate_refraction_vector(
+            n_1=self.n1, incident_direction=n1_after_filter1, n_2=self.n2,
+            normal_direction=n_LC_down_side
+        )
+
+        # ====================================================================
+        # 第二步: 基于第一次筛选的结果，计算与第二个面的交点并进行第二次筛选
+        # ====================================================================
+        _, pl2_bcs_from_valid_1 = calculate_line_surface_intersection_points_by_binary_search(
+            pl1_after_filter1, n2_after_filter1, self.up_surface_fun, min_range=-100, max_range=100
+        )
+        
+        # --- 关键修改 ---
+        # 这次筛选的输入是pl2的交点，但同时筛选的附加数组是第一次筛选后的结果
+        pl2_final, (pl1_final, n2_final), mask2 = filter_rays_by_boundary(
+            pl2_bcs_from_valid_1,
+            (0, self.bound_x),
+            (0, self.bound_y),
+            pl1_after_filter1,   # 将第一次的结果传入，进行同步筛选
+            n2_after_filter1     # 将第一次的结果传入，进行同步筛选
+        )
+        
+        if pl2_final.shape[1] == 0:
+            print("Warning: No rays hit the valid area of the second surface.")
+            empty_arr = np.array([]).reshape(3, 0)
+            final_mask = np.full(num_rays_initial, False, dtype=bool)
+            return empty_arr, empty_arr, empty_arr, empty_arr, final_mask
+            
+        # ====================================================================
+        # 第三步: 计算最终出射方向并生成最终掩码
+        # ====================================================================
+        # 计算最终出射光线的法向量和方向
+        n_LC_up_side = self.up_surface_gradient_fun(pl2_final[0, :], pl2_final[1, :])
+        n3_final = calculate_reflection_vector(
+            incident_direction=n2_final,
+            normal_direction=n_LC_up_side
+        )
+        
+        # --- 生成可用于筛选初始光线的 final_mask ---
+        final_mask = np.full(num_rays_initial, False, dtype=bool)
+        valid_indices_1 = np.where(mask1)[0]
+        final_valid_indices = valid_indices_1[mask2] # 将局部掩码 mask2 映射回全局索引
+        final_mask[final_valid_indices] = True
+        
+        # ====================================================================
+        # 第四步: 坐标变换并返回紧凑的结果
+        # ====================================================================
+        # 此时 pl1_final, n2_final, pl2_final, n3_final 的光线数完全相同
+        pl1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_final)
+        n2_wcs = self.OptEl_coordinate_to_world_coordinate(n2_final, True)
+        pl2_wcs = self.OptEl_coordinate_to_world_coordinate(pl2_final)
+        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_final, True)
+        
+        return pl2_wcs, n3_wcs, pl1_wcs, n2_wcs, final_mask
     
 
 class Point_light_source(OptElement):

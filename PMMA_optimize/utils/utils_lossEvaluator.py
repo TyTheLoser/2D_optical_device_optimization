@@ -104,7 +104,7 @@ class PlanarLossEvaluator:
         uniformity_loss = std_dev / mean_flux if mean_flux > 0 else 1.0
         return uniformity_loss, coverage_loss
 
-    def evaluate(self, ray_origins, ray_directions):
+    def evaluate(self, ray_origins, ray_directions, quiet=False):
         # 1. 使用外部函数计算交点
         intersection_points, valid_mask = calculate_ray_plane_intersections(
             ray_origins, ray_directions, self.normal, self.center.flatten()
@@ -134,7 +134,11 @@ class PlanarLossEvaluator:
         a, b, c = self.weights
         final_loss = a * loss_p + b * loss_u + c * loss_c
         
-        print(f"Loss -> Total: {final_loss:.4f} | Parallelism: {loss_p:.4f} | Uniformity: {loss_u:.4f} | Coverage: {loss_c:.4f} | Rays Hit: {final_dirs.shape[1]}/{ray_origins.shape[1]}")
+        # 将 print 语句包裹在一个条件判断中
+        if not quiet:
+            print(f"Loss -> Total: {final_loss:.4f} | Parallelism: {loss_p:.4f} | Uniformity: {loss_u:.4f} | Coverage: {loss_c:.4f} | Rays Hit: {final_dirs.shape[1]}/{ray_origins.shape[1]}")
+        
+        return final_loss, (loss_p, loss_u, loss_c), final_points_world_3d
         
         # 返回总损失、损失分量元组、以及落在边界内的三维交点
         return final_loss, (loss_p, loss_u, loss_c), final_points_world_3d

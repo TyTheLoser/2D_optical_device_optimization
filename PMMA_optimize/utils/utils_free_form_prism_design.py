@@ -153,48 +153,34 @@ def line_equation(line_points, line_vectors, t):
 def calculate_line_surface_intersection_points_by_binary_search(
         line_points, line_vectors, surface_fun, min_range=0, max_range=20, tolerance=1e-6, max_iterations=1000):
     """
-    通过二分法求解对应的交点坐标，希望速度和原来的速度相比不会太慢
-    :param line_points:
-    :param line_vectors:
-    :param surface_fun:
-    :param line_fun:
-    :param min_range:
-    :param max_range:
-    :param tolerance:
-    :param max_iterations:
-    :return:
+    通过二分法求解对应的交点坐标。
+    此版本确保始终返回与输入大小相同的数组，失败处用NaN填充。
     """
-
     def objective_function(t_value):
-        """
-        二分法寻找参数的回调函数
-        :param t_value:
-        :return: 直线的值和曲面的值的差值
-        """
+        # (objective_function 保持不变)
         result = line_points + line_vectors * t_value
         z_surface = surface_fun(x=result[0, :], y=result[1, :])
         return (result[2, :] - z_surface).reshape((1, -1))
 
-    # 将对应的搜寻范围扩大一点，防止无解的情况
-    # min_range = -100
-    # max_range = 100
-
-    # 神来之笔：
-    # 你知道我对你不仅仅是喜欢，你眼里却没有我想要的答案！
-    line_vectors = line_vectors / np.linalg.norm(line_vectors, axis=0)
-
-    ret, t_value = binary_search(
-        func=objective_function, min_range=np.ones(line_points.shape[1]) * min_range,
+    # --- 关键修改 ---
+    
+    # 1. 调用我们之前修正好的、支持部分失败的 binary_search
+    success_mask, t_values = binary_search(
+        func=objective_function, 
+        min_range=np.ones(line_points.shape[1]) * min_range,
         max_range=np.ones(line_points.shape[1]) * max_range,
-        tolerance=tolerance, max_iterations=max_iterations, parameters=(line_points, line_vectors)
+        tolerance=tolerance, max_iterations=max_iterations
     )
-    if ret:
-        intersection_points = line_points + line_vectors * t_value
-    else:
-        intersection_points = np.zeros_like(line_points)
-        print('no valid solution!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
-    return ret, intersection_points
+    # 2. 直接使用包含 NaN 的 t_values 进行计算
+    #    NumPy 会自动将 NaN 传播到计算结果中，这正是我们想要的。
+    #    line_points (3, 500) + line_vectors (3, 500) * t_values (500,)
+    #    这里的 t_values 长度与 line_points/line_vectors 的列数相同。
+    intersection_points = line_points + line_vectors * t_values
+
+    # 3. 返回的 intersection_points 数组形状将与 line_points 完全相同
+    #    例如 (3, 500)，失败的光线对应的列将是 [nan, nan, nan]。
+    return success_mask, intersection_points
 
 
 def calculate_line_surface_intersection_points(parameters, line_points, line_vectors):
@@ -544,56 +530,107 @@ def point_distance_to_lines(point, line_positions, line_vectors):
     return distances
 
 
-def binary_search(func, min_range, max_range, retry_times=0, tolerance=1e-6, max_iterations=500, parameters=None):
+
+def binary_search(func, min_range, max_range, retry_times=8, tolerance=1e-6, max_iterations=100, parameters=None):
     """
-    利用二分法来寻找对应的解
-    :param func:
-    :param min_range:
-    :param max_range:
-    :param tolerance:
-    :param max_iterations:
-    :return:
+    利用二分法寻找对应的解，支持对部分失败的项进行重试和标记。
+    此版本修正了因处理数组子集而导致的广播错误。
     """
-    invalid_mask, idx = np.where(func(min_range) * func(max_range) > 0)
-    if len(invalid_mask) > 0:
-        if retry_times > 8:
-            print("Error: Function values at interval boundaries must have different signs.")
-            return False, np.zeros_like(min_range)
-        else:
-            # 神来之笔
-            max_range[idx] += 10
-            # min_range[idx] -= 10
-            return binary_search(func, min_range, max_range, retry_times=retry_times+1, parameters=parameters)
+    current_max_range = np.copy(max_range)
+    num_total_rays = len(min_range) # 获取总光线数
+    
+    # --- 1. 括号寻找阶段 (逻辑不变) ---
+    for _ in range(retry_times + 1):
+        val_min = func(min_range)
+        val_max = func(current_max_range)
+        good_mask = (val_min * val_max <= 0).flatten()
+        if np.all(good_mask):
+            break
+        bad_mask = ~good_mask
+        current_max_range[bad_mask] += 10
+
+    # --- 2. 最终处理阶段 (逻辑不变) ---
+    final_good_mask = (func(min_range) * func(current_max_range) <= 0).flatten()
+    results = np.full(num_total_rays, np.nan, dtype=float)
+    
+    if not np.any(final_good_mask):
+        print("Error: No valid brackets found for any item after all retries.")
+        return final_good_mask, results
+
+    # --- 3. 二分法核心计算 (关键修改) ---
+    
+    # *** 不再对 min_range 和 max_range 进行切片 ***
+    # *** 始终保持它们为完整长度 (N,) ***
+    
+    # 只需要复制一份用于迭代，以避免修改原始输入
+    min_r = np.copy(min_range)
+    max_r = np.copy(current_max_range)
 
     for i in range(max_iterations):
-        center_num = (min_range + max_range) / 2
-        center_values = func(center_num)
-        min_values = func(min_range)
-        # 如果满足要求就退出，如果不满足要求就刷新上下限数值
-        if np.all(np.abs(center_values) < tolerance) or np.all((max_range - min_range) / 2 < tolerance):
-            return True, center_num
-        elif np.any(center_values * min_values < 0):
-            max_range = np.where(center_values * min_values < 0, center_num, max_range)
-        else:
-            min_range = np.where(center_values * min_values >= 0, center_num, min_range)
+        # 计算所有光线的中间点，center_r 的长度将是 N
+        center_r = (min_r + max_r) / 2
+        
+        # 检查收敛时，只关心那些我们正在处理的“好”光线
+        if np.all(np.abs(max_r[final_good_mask] - min_r[final_good_mask]) / 2 < tolerance):
+            break
 
-    # print(f"Error: Maximum number of iterations reached. !!!!!!!!!!!!!!!!")
-    return True, center_num
-    # if func(min_range) * func(max_range) > 0:
-    #     print("Error: Function values at interval boundaries must have different signs.")
-    #     return False, 0
-    #
-    # for _ in range(max_iterations):
-    #     center_num = (min_range + max_range) / 2
-    #     if func(center_num) == 0 or (max_range - min_range) / 2 < tolerance:
-    #         return True, center_num
-    #     elif func(center_num) * func(min_range) < 0:
-    #         max_range = center_num
-    #     else:
-    #         min_range = center_num
-    #
-    # print("Error: Maximum number of iterations reached.")
-    # return False, 0
+        # func 的输入 center_r 长度为 N，与 line_vectors 匹配，不会再报错
+        f_center = func(center_r).flatten()
+        f_min = func(min_r).flatten()
+        
+        change_to_max = f_center * f_min < 0
 
+        # *** 关键：只更新那些在 final_good_mask 中为 True 的光线的边界 ***
+        update_max_mask = change_to_max & final_good_mask
+        update_min_mask = (~change_to_max) & final_good_mask
+        
+        max_r[update_max_mask] = center_r[update_max_mask]
+        min_r[update_min_mask] = center_r[update_min_mask]
+        
+    # --- 4. 返回最终结果 ---
+    final_t_values = (min_r + max_r) / 2
+    # 只将有效光线的结果写入最终的 results 数组
+    results[final_good_mask] = final_t_values[final_good_mask]
+    
+    success_mask = ~np.isnan(results)
+    return success_mask, results
+
+def filter_rays_by_boundary(
+    points_to_check: np.ndarray,
+    boundary_x: tuple,
+    boundary_y: tuple,
+    *arrays_to_filter: np.ndarray
+) -> tuple:
+    """
+    根据一个矩形边界来筛选光线数据。
+
+    函数会检查 `points_to_check` 中的每个点的 (x, y) 坐标是否在指定的边界内，
+    然后返回所有在边界内的点，以及在 `arrays_to_filter` 中传入的、相应位置的向量或其他数据。
+
+    :param points_to_check: np.ndarray, 需要进行边界检查的三维点坐标数组, 形状为 (3, N)。
+    :param boundary_x: tuple, X方向的边界范围 (x_min, x_max)。
+    :param boundary_y: tuple, Y方向的边界范围 (y_min, y_max)。
+    :param arrays_to_filter: 任意数量的、需要与 `points_to_check` 同步筛选的数组。
+                             它们的第二个维度长度必须也为 N。
+    :return: tuple, 返回一个元组，包含：
+             - points_inside (np.ndarray): 通过筛选的点的坐标。
+             - filtered_arrays (tuple): 一个包含所有被筛选后的其他数组的元组。
+             - mask (np.ndarray): 用于筛选的布尔掩码，长度为 N。
+    """
+    # 首先处理特殊情况：如果没有输入点，则直接返回空值
+    if points_to_check.shape[1] == 0:
+        return np.array([]).reshape(3, 0), tuple(arr.reshape(arr.shape[0], 0) for arr in arrays_to_filter), np.array([], dtype=bool)
+
+    # 创建布尔掩码，检查 x 和 y 坐标是否在定义的边界内
+    mask = (points_to_check[0, :] >= boundary_x[0]) & (points_to_check[0, :] <= boundary_x[1]) & \
+           (points_to_check[1, :] >= boundary_y[0]) & (points_to_check[1, :] <= boundary_y[1])
+
+    # 使用掩码筛选主数组（points_to_check）
+    points_inside = points_to_check[:, mask]
+
+    # 使用相同的掩码筛选所有其他传入的数组
+    filtered_arrays = tuple(arr[:, mask] for arr in arrays_to_filter)
+
+    return points_inside, filtered_arrays, mask
 
 
