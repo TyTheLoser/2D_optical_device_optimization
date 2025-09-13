@@ -2,7 +2,7 @@ import json
 import math
 from abc import abstractmethod
 from enum import Enum
-
+from stl import mesh
 import numpy as np
 import scipy as sp
 from matplotlib import pyplot as plt
@@ -466,32 +466,23 @@ def coordinate_transformation(point_1, translation_matrix_1_to_2, rotate_matrix_
 
 
 class OptElement:
-    def __init__(self):
-        self.n1 = 1  # 入射介质折射率
-        self.n2 = 1.5  # 自身折射率
-        self.n3 = 1  # 出射介质折射率
+    def __init__(self,up_surface_params,down_surface_params,bound=[11.2,1],OptEl_to_world_translation_matrix=np.zeros((3,1)),\
+                 OptEl_to_world_rotation_matrix=np.array([[1,0,0],[0,1,0],[0,0,1]])):
+        super().__init__()
+        self.n1 = 1  # 入射空间的折射率
+        self.n2 = 1.49  # 自身的折射率
+        self.n3 = 1  # 出射空间的折射率
+        self.up_surface_params = up_surface_params
+        self.down_surface_params = down_surface_params
+        self.bound_x = bound[0]
+        self.bound_y = bound[1]
+        
+        self.OptEl_to_world_translation_matrix = OptEl_to_world_translation_matrix  
+        self.OptEl_to_world_rotation_matrix = OptEl_to_world_rotation_matrix
+        self.world_to_OptEl_translation_matrix = -self.OptEl_to_world_translation_matrix  # 光学器件的平移矩阵
+        self.world_to_OptEl_rotation_matrix = self.OptEl_to_world_rotation_matrix.T  # 光学器件的旋转矩阵
 
-        # 世界坐标到器件之间的欧拉角，便于可视化直观理解
-        self.world_to_OptEl_rot_vec = np.zeros((3, 1))
-        self.world_to_OptEl_reflection = None
-
-        # 坐标变换的参数内容
-        self.world_to_OptEl_translation_matrix = np.zeros((3,1))  # 光学器件的平移矩阵
-        self.world_to_OptEl_rotation_matrix = np.array([[1,0,0],
-                                                       [0,1,0],
-                                                       [0,0,1]])  # 光学器件的旋转矩阵
-        self.OptEl_to_world_translation_matrix = -self.world_to_OptEl_translation_matrix  # 光学器件的平移矩阵
-        self.OptEl_to_world_rotation_matrix = np.array([[1,0,0],
-                                                       [0,1,0],
-                                                       [0,0,1]])  # 光学器件的旋转矩阵
-        # self.world_to_OptEl_translation_matrix = np.zeros((3,1))  # 光学器件的平移矩阵
-        # self.world_to_OptEl_rotation_matrix = np.array([[1,0,0],
-        #                                                [0,1,0],
-        #                                                [0,0,1]])  # 光学器件的旋转矩阵
-        # self.OptEl_to_world_translation_matrix = np.zeros((3,1))  # 光学器件的平移矩阵
-        # self.OptEl_to_world_rotation_matrix = np.array([[1,0,0],
-        #                                                [0,1,0],
-        #                                                [0,0,1]])  # 光学器件的旋转矩阵
+        self.get_parameters()
     def get_parameters(self):
         """
         获取这个光学器件的位姿参数，包括旋转向量和平移向量
@@ -512,20 +503,140 @@ class OptElement:
         rot_mat = rotvec_to_matrix(rot_vec, self.world_to_OptEl_reflection)
         self.set_world_to_OptEl_rotate_translation_matrix(rot_mat, trans_vec, methord)
 
+    def generate_lc_device_stl(self,output_filename, density=100):
+        """
+        根据LC_device实例生成一个闭合的实体STL模型。
 
-    def save_model(self):
+        :param lc_device: LC_device类的一个实例。
+        :param output_filename: 输出的STL文件名。
+        :param density: XY平面的网格密度，数值越高模型越精细。
         """
-        保存模型的关键参数到 JSON 格式数据。
-        :return: 返回 json 格式的数据
-        """
-        model_data = {}
-        for attr, value in self.__dict__.items():
-            # 如果属性是 numpy 数组，转换为列表
-            if isinstance(value, np.ndarray):
-                model_data[attr] = value.tolist()
+        print(f"正在生成STL模型，密度为 {density}x{density}...")
+
+        # --- 1. 生成顶点网格 ---
+        x = np.linspace(0, self.bound_x, density)
+        y = np.linspace(0, self.bound_y, density)
+        xx, yy = np.meshgrid(x, y)
+
+        # --- 2. 计算上下表面顶点 ---
+        # 向量化计算所有Z坐标
+        zz_up = self.up_surface_fun(xx, yy)
+        zz_down = self.down_surface_fun(xx, yy)
+        
+        # 将顶点数据整合为 (density, density, 3) 的数组
+        up_vertices = np.stack([xx, yy, zz_up], axis=-1)
+        down_vertices = np.stack([xx, yy, zz_down], axis=-1)
+
+        # --- 3. 构建上下表面三角面片 (向量化) ---
+        def create_surface_faces(vertices, reverse_winding=False):
+            """从顶点网格高效创建三角面片"""
+            # (density-1, density-1) 个小方格
+            quads_v1 = vertices[:-1, :-1]
+            quads_v2 = vertices[1:, :-1]
+            quads_v3 = vertices[:-1, 1:]
+            quads_v4 = vertices[1:, 1:]
+
+            num_quads = (density - 1) * (density - 1)
+            faces1 = np.zeros((num_quads, 3, 3))
+            faces2 = np.zeros((num_quads, 3, 3))
+
+            # 第一个三角形 (v1, v2, v4)
+            faces1[:, 0, :] = quads_v1.reshape(-1, 3)
+            faces1[:, 1, :] = quads_v2.reshape(-1, 3)
+            faces1[:, 2, :] = quads_v4.reshape(-1, 3)
+
+            # 第二个三角形 (v1, v4, v3)
+            faces2[:, 0, :] = quads_v1.reshape(-1, 3)
+            faces2[:, 1, :] = quads_v4.reshape(-1, 3)
+            faces2[:, 2, :] = quads_v3.reshape(-1, 3)
+            
+            if reverse_winding:
+                # 翻转顶点顺序以使法向量朝外
+                return np.concatenate([faces1[:, ::-1, :], faces2[:, ::-1, :]], axis=0)
             else:
-                model_data[attr] = value
-        return json.dumps(model_data, indent=4)
+                return np.concatenate([faces1, faces2], axis=0)
+
+        top_faces = create_surface_faces(up_vertices)
+        bottom_faces = create_surface_faces(down_vertices, reverse_winding=True)
+
+        # --- 4. 构建侧壁三角面片 (向量化) ---
+        def create_side_faces(top_v, bottom_v):
+            """连接上下边界以创建侧壁"""
+            all_side_faces = []
+            # 遍历四条边: 右, 左, 上, 下
+            boundaries = [
+                (top_v[:, -1], bottom_v[:, -1]),   # 右边 (x=max)
+                (top_v[::-1, 0], bottom_v[::-1, 0]), # 左边 (x=min), 反转顺序保持连接性
+                (top_v[-1, ::-1], bottom_v[-1, ::-1]), # 上边 (y=max), 反转顺序
+                (top_v[0, :], bottom_v[0, :])     # 下边 (y=min)
+            ]
+
+            for top_edge, bottom_edge in boundaries:
+                edge_len = len(top_edge) - 1
+                side_faces1 = np.zeros((edge_len, 3, 3))
+                side_faces2 = np.zeros((edge_len, 3, 3))
+                
+                # 每个边上的小方格
+                v1 = top_edge[:-1]
+                v2 = bottom_edge[:-1]
+                v3 = bottom_edge[1:]
+                v4 = top_edge[1:]
+                
+                # 三角形1: (v1, v2, v3)
+                side_faces1[:, 0, :] = v1
+                side_faces1[:, 1, :] = v2
+                side_faces1[:, 2, :] = v3
+
+                # 三角形2: (v1, v3, v4)
+                side_faces2[:, 0, :] = v1
+                side_faces2[:, 1, :] = v3
+                side_faces2[:, 2, :] = v4
+                
+                all_side_faces.append(side_faces1)
+                all_side_faces.append(side_faces2)
+            
+            return np.concatenate(all_side_faces, axis=0)
+
+        side_faces = create_side_faces(up_vertices, down_vertices)
+        
+        # --- 5. 整合所有面片并进行坐标变换 ---
+        all_faces_local = np.concatenate([top_faces, bottom_faces, side_faces], axis=0)
+        
+        # 从 (num_faces, 3, 3) 变为 (num_faces * 3, 3) 以便进行矩阵运算
+        num_faces_total = all_faces_local.shape[0]
+        all_vertices_local = all_faces_local.reshape(num_faces_total * 3, 3)
+
+        # 应用旋转和平移 (向量化)
+        # world_coord = Rotation @ local_coord + Translation
+        rotation_matrix = self.OptEl_to_world_rotation_matrix
+        translation_vector = self.OptEl_to_world_translation_matrix
+        
+        # @ 是矩阵乘法运算符
+        all_vertices_world = (rotation_matrix @ all_vertices_local.T).T + translation_vector.T
+
+        # 将顶点数据重塑回 (num_faces, 3, 3)
+        all_faces_world = all_vertices_world.reshape(num_faces_total, 3, 3)
+
+        # --- 6. 创建并导出STL ---
+        solid_mesh = mesh.Mesh(np.zeros(all_faces_world.shape[0], dtype=mesh.Mesh.dtype))
+        solid_mesh.vectors = all_faces_world
+        
+        solid_mesh.save(output_filename)
+        print(f"模型已成功保存至: {output_filename}")
+        print(f"总面数: {num_faces_total}")
+        def save_model(self):
+            """
+            保存模型的关键参数到 JSON 格式数据。
+            :return: 返回 json 格式的数据
+            """
+            model_data = {}
+            for attr, value in self.__dict__.items():
+                # 如果属性是 numpy 数组，转换为列表
+                if isinstance(value, np.ndarray):
+                    model_data[attr] = value.tolist()
+                else:
+                    model_data[attr] = value
+            return json.dumps(model_data, indent=4)
 
     def load_model(self, model_json):
         """
@@ -750,8 +861,14 @@ class BP(OptElement):
 
 
 class BFP(OptElement):
-    def __init__(self):
-        super().__init__()
+    def __init__(self,up_surface_params=None,down_surface_params=None,bound=[11.2,1],OptEl_to_world_translation_matrix=np.zeros((3,1)),\
+                 OptEl_to_world_rotation_matrix=np.array([[1,0,0],[0,1,0],[0,0,1]])):
+        # 将构造函数收到的参数全部传递给父类
+        super().__init__(up_surface_params=up_surface_params,
+                        down_surface_params=down_surface_params,
+                        bound=bound,
+                        OptEl_to_world_translation_matrix=OptEl_to_world_translation_matrix,
+                        OptEl_to_world_rotation_matrix=OptEl_to_world_rotation_matrix)
         self.left_surface_params = np.array([
             17.595166825667565,
             -0.752562775772513,
@@ -1075,7 +1192,12 @@ class GLASS(PMMA):
 class LC_device(BFP):
     def __init__(self,up_surface_params,down_surface_params,bound=[11.2,1],OptEl_to_world_translation_matrix=np.zeros((3,1)),\
                  OptEl_to_world_rotation_matrix=np.array([[1,0,0],[0,1,0],[0,0,1]])):
-        super().__init__()
+        # 将构造函数收到的参数全部传递给父类
+        super().__init__(up_surface_params=up_surface_params,
+                        down_surface_params=down_surface_params,
+                        bound=bound,
+                        OptEl_to_world_translation_matrix=OptEl_to_world_translation_matrix,
+                        OptEl_to_world_rotation_matrix=OptEl_to_world_rotation_matrix)
         self.n1 = 1  # 入射空间的折射率
         self.n2 = 1.49  # 自身的折射率
         self.n3 = 1  # 出射空间的折射率
