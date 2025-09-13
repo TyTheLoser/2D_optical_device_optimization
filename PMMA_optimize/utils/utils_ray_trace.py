@@ -466,7 +466,7 @@ def coordinate_transformation(point_1, translation_matrix_1_to_2, rotate_matrix_
 
 
 class OptElement:
-    def __init__(self,up_surface_params,down_surface_params,bound=[11.2,1],OptEl_to_world_translation_matrix=np.zeros((3,1)),\
+    def __init__(self,up_surface_params=None,down_surface_params=None,bound=[11.2,1],OptEl_to_world_translation_matrix=np.zeros((3,1)),\
                  OptEl_to_world_rotation_matrix=np.array([[1,0,0],[0,1,0],[0,0,1]])):
         super().__init__()
         self.n1 = 1  # 入射空间的折射率
@@ -1445,31 +1445,28 @@ class Point_light_source(OptElement):
     该光源从一个指定位置，向一个半球形或锥形区域内均匀发射光线。
     """
     def __init__(self, 
-                 num_rays=1000, 
-                 position=np.array([[0],[0],[0]]), 
-                 emission_angle_deg=90, 
-                 color='red'):
-        """
-        初始化点光源。
-        
-        :param num_rays: int, 生成的光线数量。
-        :param position: np.ndarray, 光源位置，形状为 (3, 1) 的列向量。
-        :param emission_angle_deg: float, 光线发射的半顶角（单位：度）。
-                                    例如：90度代表沿z轴正方向的半球空间，180度代表整个球形空间。
-        :param color: str, 光线的颜色，用于绘图。
-        """
-        super().__init__()
-        self.num_rays = num_rays
-        self.position = position
-        self.emission_angle_deg = emission_angle_deg
-        self.color = color
+                num_rays=1000, 
+                emission_angle_deg=90, 
+                color='red',
+                OptEl_to_world_translation_matrix=np.zeros((3,1)),
+                OptEl_to_world_rotation_matrix=np.array([[1,0,0],[0,1,0],[0,0,1]])):
+        # 将构造函数收到的参数全部传递给父类
+        super().__init__(OptEl_to_world_translation_matrix=OptEl_to_world_translation_matrix,
+                        OptEl_to_world_rotation_matrix=OptEl_to_world_rotation_matrix)
+        self.num_rays = num_rays  # 光线数量
+        self.emission_angle_deg = emission_angle_deg  # 发射角度（以度为单位）
+        self.color=color  # 光源颜色
+        self.OptEl_to_world_translation_matrix = OptEl_to_world_translation_matrix  
+        self.OptEl_to_world_rotation_matrix = OptEl_to_world_rotation_matrix
+        self.world_to_OptEl_translation_matrix = -self.OptEl_to_world_translation_matrix  # 光学器件的平移矩阵
+        self.world_to_OptEl_rotation_matrix = self.OptEl_to_world_rotation_matrix.T  # 光学器件的旋转矩阵
 
     def plot_OptEl(self, ax):
         """
         在给定的 3D Matplotlib 坐标轴上绘制点光源。
         """
         # 将元件坐标转换为世界坐标进行绘制
-        point = self.OptEl_coordinate_to_world_coordinate(self.position, False)
+        point = self.OptEl_to_world_translation_matrix
         ax.scatter(point[0], point[1], point[2], color=self.color, s=50, label='Point Light Source')
 
     def trace_ray(self):
@@ -1485,7 +1482,7 @@ class Point_light_source(OptElement):
         """
         # 1. 生成光线位置
         # 所有光线都从同一点发出，因此我们将位置向量复制 num_rays 次。
-        p_wcs = np.tile(self.position, (1, self.num_rays))
+        p_wcs = np.tile(self.OptEl_to_world_translation_matrix, (1, self.num_rays))
 
         # 2. 生成光线方向向量
         # 在由 emission_angle_deg 定义的球冠上均匀生成随机方向
@@ -1512,5 +1509,7 @@ class Point_light_source(OptElement):
         # 尽管从数学上讲向量已经是归一化的，但进行一次确认总是一个好习惯
         # norms = np.linalg.norm(n_wcs, axis=0)
         # n_wcs = n_wcs / norms
+
+        n_wcs = self.OptEl_coordinate_to_world_coordinate(n_wcs, True)
 
         return p_wcs, n_wcs

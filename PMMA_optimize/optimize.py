@@ -53,17 +53,127 @@ def visualize_ray_tracing(title, lc_device, light_sources, evaluator, rays_to_pl
     # 设置一个好的观察视角
     ax.view_init(elev=10, azim=-70)
     plt.show()
+def calculate_light_sources_from_params(a, l1, l2, l3, num_rays=500, emission_angle_deg=30):
+    """
+    根据斜率a和三个长度比例l1,l2,l3，计算三个光源的位置和姿态。
+
+    :param a: 直线的斜率 (z+3.25 = a*(x-7.23))
+    :param l1, l2, l3: 三个光源在线段上的相对位置比例 [-1, 1]
+    :return: light_sources_config 列表
+    """
+    # --- a. 计算直线与矩形的交点 ---
+    rect_bounds = {'x_min': 2.8, 'x_max': 11.66, 'z_min': -5.5, 'z_max': -1.0}
+    
+    intersections = []
+    
+    # 直线方程: z = a*x - 7.23*a - 3.25
+    # 检查与 x 边界的交点
+    x_at_xmin = rect_bounds['x_min']
+    z_at_xmin = a * x_at_xmin - 7.23 * a - 3.25
+    if rect_bounds['z_min'] <= z_at_xmin <= rect_bounds['z_max']:
+        intersections.append(np.array([x_at_xmin, z_at_xmin]))
+        
+    x_at_xmax = rect_bounds['x_max']
+    z_at_xmax = a * x_at_xmax - 7.23 * a - 3.25
+    if rect_bounds['z_min'] <= z_at_xmax <= rect_bounds['z_max']:
+        intersections.append(np.array([x_at_xmax, z_at_xmax]))
+
+    # 检查与 z 边界的交点
+    if a != 0: # 避免除以零
+        z_at_zmin = rect_bounds['z_min']
+        x_at_zmin = (z_at_zmin + 7.23 * a + 3.25) / a
+        if rect_bounds['x_min'] <= x_at_zmin <= rect_bounds['x_max']:
+            intersections.append(np.array([x_at_zmin, z_at_zmin]))
+
+        z_at_zmax = rect_bounds['z_max']
+        x_at_zmax = (z_at_zmax + 7.23 * a + 3.25) / a
+        if rect_bounds['x_min'] <= x_at_zmax <= rect_bounds['x_max']:
+            intersections.append(np.array([x_at_zmax, z_at_zmax]))
+
+    # 应该恰好找到两个交点形成线段
+    if len(intersections) != 2:
+        # 如果找不到两个交点（例如直线完全在矩形外），返回一个空配置或错误
+        # 在优化中，这种情况可能会得到一个极差的分数，从而被算法淘汰
+        return []
+        
+    p_start, p_end = intersections
+    
+    # --- b. 计算线段中心和半长向量 ---
+    segment_center = (p_start + p_end) / 2.0
+    segment_half_vector = (p_end - p_start) / 2.0
+
+    # --- c. 计算光源位置 ---
+    ratios = [l1, l2, l3]
+    positions_xz = [segment_center + r * segment_half_vector for r in ratios]
+    
+    # 转换为三维列向量 (x, 0, z)
+    positions_3d = [np.array([pos[0], 0, pos[1]]).reshape(-1, 1) for pos in positions_xz]
+
+    # --- d. 计算光源姿态 (旋转矩阵) ---
+    # 方向向量是线段的方向，指向z轴正半轴，所以我们确保dz为正
+    direction_vec_xz = p_end - p_start
+    if np.linalg.norm(direction_vec_xz) < 1e-9:
+        # 如果线段长度几乎为零，则使用默认方向（沿X轴）
+        direction_vec_xz = np.array([1.0, 0.0])
+    else:
+        if direction_vec_xz[1] < 0: # z分量为负
+            direction_vec_xz = -direction_vec_xz
+        # 将方向向量单位化
+        direction_vec_xz = direction_vec_xz / np.linalg.norm(direction_vec_xz)
+
+    # 从单位方向向量中获取 dx 和 dz
+    dx, dz = direction_vec_xz[0], direction_vec_xz[1]
+
+    # 构建新的坐标系
+    # 新的 X' 轴是线段的方向
+    new_x_axis = np.array([dx, 0, dz])
+    # 新的 Y' 轴保持不变 (绕Y轴旋转)
+    new_y_axis = np.array([0, 1, 0])
+    # 新的 Z' 轴垂直于线段方向且“朝上”（在XZ平面内旋转90度）
+    new_z_axis = np.array([-dz, 0, dx])
+
+    # 将新的基准坐标轴作为列向量组合成旋转矩阵
+    # np.stack([...], axis=1) 可以方便地实现这一点
+    rotation_matrix = np.stack([new_x_axis, new_y_axis, new_z_axis], axis=1)
+
+    # 现在 rotation_matrix 会将光源的默认 Z 轴 (0,0,1) 旋转到 new_z_axis 的方向，
+    # 同时将默认的 X 轴 (1,0,0) 旋转到 new_x_axis 的方向。
+    
+    # --- e. 构建光源配置列表 ---
+    light_sources_config = []
+    for pos in positions_3d:
+        light_sources_config.append({
+            'OptEl_to_world_translation_matrix': pos,
+            'num_rays': num_rays,
+            'emission_angle_deg': emission_angle_deg,
+            "OptEl_to_world_rotation_matrix": rotation_matrix
+        })
+        
+    return light_sources_config
+
 class Objective:
     """
     一个封装器类，连接Scipy优化器和您的评估器。
-    新版本整合了罚函数来处理约束。
+    新版本整合了光源参数优化和约束处理。
     """
-    def __init__(self, lc_class, initial_rays, loss_evaluator, initial_params_config, constraints_config):
+    def __init__(self, lc_class, light_source_class, loss_evaluator, 
+                 initial_params_config, initial_light_control_params, constraints_config):
+        
+        # 存储构造器类
         self.lc_class = lc_class
-        self.initial_rays = initial_rays
+        self.light_source_class = light_source_class
         self.loss_evaluator = loss_evaluator
+        
+        # 记录各部分参数的数量，用于后续解包
         self.num_up_params = len(initial_params_config['up_surface_params'])
-        self.initial_params = initial_params_config
+        self.num_down_params = len(initial_params_config['down_surface_params'])
+        self.num_light_params = len(initial_light_control_params)
+        
+        # 存储设备不变的参数 (例如 bound, translation)
+        self.device_static_config = {
+            'bound': initial_params_config['bound'],
+            'OptEl_to_world_translation_matrix': initial_params_config['OptEl_to_world_translation_matrix']
+        }
         
         # 存储约束检查所需的网格
         cfg = constraints_config
@@ -77,23 +187,9 @@ class Objective:
         self.last_loss = float('inf')
         self.last_penalty = float('inf')
 
-    def __call__(self, params):
-        """
-        这个方法会被scipy.optimize.minimize调用。
-        它接收待优化参数，返回一个包含罚分的总损失值。
-        """
-        # 1. 从优化器传入的一维数组中解析出曲面参数
-        self.initial_params['up_surface_params'] = params[:self.num_up_params]
-        self.initial_params['down_surface_params'] = params[self.num_up_params:]
-        # 2. 创建光学元件实例 (*** 只在这里创建一次 ***)
-        device = self.lc_class(**self.initial_params)
-        
-        # 3. 执行光线追迹，计算主损失
-        points, normals = self.initial_rays
-        pl2, n3, pl1, n2, final_mask = device.trace_ray(points, normals)
-        primary_loss, _, _ = self.loss_evaluator.evaluate(pl2, n3, quiet=True)
-
-        # 4. (新增) 使用同一个 device 实例计算所有约束的惩罚
+    def _calculate_thickness_penalty(self, device):
+        """计算厚度约束的罚函数"""
+         # 4. (新增) 使用同一个 device 实例计算所有约束的惩罚
         total_penalty = 0.0
         
         # 计算表面Z值 (只计算一次)
@@ -114,14 +210,67 @@ class Objective:
         c3 = np.min(z_down - 0)
         total_penalty += self.penalty_weight * np.maximum(0, -c3)**2
         
-        # 5. 计算最终总损失
-        total_loss = primary_loss + total_penalty
         
-        # 6. 存储损失值，以便回调函数可以更新tqdm
-        self.last_loss = primary_loss
-        self.last_penalty = total_penalty
+        return total_penalty
+
+    def __call__(self, params):
+        """
+        这个方法会被scipy.optimize调用。
+        它接收一个包含所有待优化参数的向量，返回一个总损失值。
+        """
+        # 1. 从优化器传入的一维数组中解包所有参数
+        up_params = params[:self.num_up_params]
+        down_params = params[self.num_up_params : self.num_up_params + self.num_down_params]
+        light_control_params = params[self.num_up_params + self.num_down_params:]
+
+        # 2. 动态生成当前迭代的光源配置
+        # 使用 * 将 light_control_params 列表解包为独立的参数 (a, l1, l2, l3)
+        current_light_sources_config = calculate_light_sources_from_params(*light_control_params)
+
+        # 如果光源参数组合无效（例如直线不与矩形相交），立即返回一个巨大的惩罚值
+        if not current_light_sources_config:
+            self.last_loss = float('inf')
+            self.last_penalty = float('inf')
+            # 优化器会寻找最小值，所以返回一个大数来“惩罚”这个无效的参数组合
+            return 1e9
+
+        # 3. 创建当前迭代的光学系统实例
+        # a. 创建光学元件
+        device_current_config = {
+            'up_surface_params': up_params,
+            'down_surface_params': down_params,
+            **self.device_static_config
+        }
+        device = self.lc_class(**device_current_config)
+
+        # b. 创建光源
+        light_sources = [self.light_source_class(**config) for config in current_light_sources_config]
+
+        all_initial_points, all_initial_normals = [], []
+        for light_source in light_sources:
+            points, normals = light_source.trace_ray()
+            all_initial_points.append(points); all_initial_normals.append(normals)
+        initial_points,initial_normals = np.hstack(all_initial_points), np.hstack(all_initial_normals)
+        # 3. 执行光线追迹，计算主损失
+        pl2, n3, pl1, n2, final_mask = device.trace_ray(initial_points, initial_normals)
+        points_evaluate, normals_evaluate = np.hstack([pl1, pl2]), np.hstack([n2, n3])
+        loss, _, _ = self.loss_evaluator.evaluate(points_evaluate, normals_evaluate, quiet=True)
         
-        return total_loss
+        # 5. 计算损失值 (Loss) 和罚分 (Penalty)
+        penalty = self._calculate_thickness_penalty(device)
+        
+        # 存储本次结果，用于调试或打印回调
+        self.last_loss = loss
+        self.last_penalty = penalty
+        
+        # 6. 返回加权总分
+        total_score = loss + penalty
+        
+        # (可选) 打印进度
+        # print(f"Loss: {loss:.4f}, Penalty: {penalty:.4f}, Total Score: {total_score:.4f}")
+        
+        return total_score
+
 
 # ============================================================================
 # 步骤 2: (修改) 优化控制器，移除 constraint 参数
@@ -335,102 +484,161 @@ def nelder_mead_Opti():
     # 可视化依然使用 vis_sources
     visualize_ray_tracing("Optimized Parameters", final_lc, vis_sources, evaluator, rays_to_plot_per_source=20)
 
-def differential_evolution_Opti():
+def differential_evolution_Opti(
+    initial_params_path: str=None,
+    save_path: str = None,
+    bounds: list = None,
+    visualize_before_run: bool = True
+):
     """
     使用差分进化 (Differential Evolution) 全局优化算法的运行脚本。
-    """
-    # --- a. 定义初始参数和配置 (与 nelder_mead_Opti 相同) ---
-    surface_params=np.load('PMMA_optimize/output/optimized_params_DE_0913_BEST.npy')
-    surface_params[0]=39.54
-    initial_params_config = {
-        'up_surface_params': surface_params[:12],
-        'down_surface_params': surface_params[12:],
-        'bound':[15.1,1],
-        'OptEl_to_world_translation_matrix': np.array([0, -0.5, 0]).reshape(-1, 1),
-    }
-    
-    opt_light_sources_config = [
-        {'position': np.array([7.08, 0, -1.1]).reshape(-1, 1), 'num_rays': 500, 'emission_angle_deg': 30},
-        {'position': np.array([7.08-0.51, 0, -1.1]).reshape(-1, 1), 'num_rays': 500, 'emission_angle_deg': 30},
-        {'position': np.array([7.08+0.51, 0, -1.1]).reshape(-1, 1), 'num_rays': 500, 'emission_angle_deg': 30}
-    ]
+    此函数现在支持表面和光源参数的联合优化。
 
-    vis_light_sources_config = [
-        {'position': np.array([7.08, 0, -1.1]).reshape(-1, 1), 'num_rays': 500, 'emission_angle_deg': 30},
-    ]
+    :param initial_params_path: 包含初始参数的一维Numpy数组 (.npy) 的路径。
+                                 格式: [12个上表面参数, 12个下表面参数, 4个光源控制参数]
+    :param save_path: 优化后的最佳参数的保存路径 (.npy)。如果为None，则默认覆盖初始文件。
+    :param bounds: Scipy优化器所需的边界列表。如果为None，则根据初始参数自动生成。
+    :param visualize_before_run: 是否在优化开始前进行可视化。
+    """
+    # --- 1. 处理输入参数和路径 ---
+    if save_path is None:
+        save_path = initial_params_path
     
+    print(f"--- Starting Differential Evolution Optimization ---")
+    print(f"Loading initial parameters from: {initial_params_path}")
+    print(f"Optimized parameters will be saved to: {save_path}")
+
+    # --- 2. 定义不变的配置 ---
+    # 这些配置定义了本次优化的“问题”本身，保持不变
     evaluator_config = {
-        'plane_normal': np.array([1, 0, 0]),
-        'plane_center': np.array([0, 0, 29]),
-        'plane_width': 1,
-        'plane_height': 20,
-        'weights': (0.6, 0.1, 0.3),
-        'grid_size': 30
+        'plane_normal': np.array([1, 0, 0]), 'plane_center': np.array([0, 0, 29]),
+        'plane_width': 1, 'plane_height': 20, 'weights': (0.6, 0.1, 0.3), 'grid_size': 30
     }
     constraints_config = {
-        'x_range': [0, 11.2], 
-        'y_range': [0, 1],
-        'sample_resolution': 25,
-        'penalty_weight': 1000.0
+        'x_range': [0, 11.2], 'y_range': [0, 1],
+        'sample_resolution': 25, 'penalty_weight': 1000.0
+    }
+    optimizer_static_config = {
+        'maxiter': 1, 'popsize': 20, 'tol': 0.000001, 'workers': -1
     }
 
-    # --- b. (新增) 为差分进化定义每个参数的边界 (Bounds) ---
-    print("--- Defining Bounds for Differential Evolution ---")
-    bounds = []
-    num_up = len(initial_params_config['up_surface_params'])
-    num_down = len(initial_params_config['down_surface_params'])
     
-    # 上表面参数边界 (示例)
-    up_init = initial_params_config['up_surface_params']
-    bounds.append((up_init[0]-0.0001, up_init[0] )) # Z-offset (c0) 允许在初始值附近±5变化
-    bounds.append((up_init[1] - 0.0002, up_init[1] + 0.0001)) # x-tilt (c1) 允许在初始值附近±2变化
-    bounds.append((up_init[2] - 0.0001, up_init[2] + 0.0001)) # y-tilt (c2) 允许在初始值附近±2变化
-    bounds.extend([(-0.00005, 0.00005)] * (num_up - 3))    # 其他高阶项允许在(-0.5, 0.5)之间变化
     
-    # 下表面参数边界 (示例)
-    down_init = initial_params_config['down_surface_params']
-    bounds.append((down_init[0], down_init[0]+0.1)) # Z-offset (c0) 允许在初始值附近±5变化
-    bounds.append((down_init[1] - 0.01, down_init[1] + 0.01)) # x-tilt (c1) 允许在初始值附近±2变化
-    bounds.append((down_init[2] - 0.01, down_init[2] + 0.01)) # y-tilt (c2) 允许在初
-    bounds.extend([(-0.00001, 0.00001)] * (num_down - 3))    # 其他高阶项允许在(-0.5, 0.5)之间变化
+    
+    # --- 3. 加载并解包初始参数 ---
+    if initial_params_path is None:
+        print("Initial parameters config not provided, using default values.")
+        print("auto-generating default initial parameters...")
+        initial_params_vector = np.concatenate([
+            np.array([39.54, -1.4,-0.1] + [0]*9), # 上表面
+            np.array([0]*12),                    # 下表面
+            np.array([-0.1, 0.0, -0.5, 0.5])       # 光源控制参数 (a, l1, l2, l3)
+        ])
+    else:
+        initial_params_vector = np.load(initial_params_path)
+    # 定义参数结构
+    num_up, num_down, num_light = 12, 12, 4
+    if len(initial_params_vector) != num_up + num_down + num_light:
+        print(f"Initial parameters file has wrong length. Expected {num_up+num_down+num_light}, got {len(initial_params_vector)}")
+        print("auto-generating default initial parameters...")
+        initial_params_vector = np.concatenate([
+            np.array([39.54, -1.4,-0.1] + [0]*9), # 上表面
+            np.array([0]*12),                    # 下表面
+            np.array([-0.1, 0.0, -0.5, 0.5])       # 光源控制参数 (a, l1, l2, l3)
+        ])
+
+    up_init = initial_params_vector[:num_up]
+    down_init = initial_params_vector[num_up : num_up + num_down]
+    light_init = initial_params_vector[num_up + num_down:]
+
+    initial_params_config = {
+        'up_surface_params': up_init,
+        'down_surface_params': down_init,
+        'bound': [15.1, 1],
+        'OptEl_to_world_translation_matrix': np.array([0, -0.5, 0]).reshape(-1, 1),
+    }
+
+    # --- 4. 设置优化边界 (Bounds) ---
+    if bounds is None:
+        print("--- No bounds provided, generating default bounds... ---")
+        bounds = []
+        # 上表面边界
+        bounds.append((up_init[0] - 0.01, up_init[0]+1e-6))
+        bounds.append((up_init[1] - 0.5, up_init[1]+1e-6))
+        bounds.append((up_init[2] - 0.1, up_init[2]+1e-6))
+        bounds.extend([(-0.00005, 0.00005)] * (num_up - 3))
+        # 下表面边界
+        bounds.append((down_init[0], down_init[0] + 0.1))
+        bounds.append((down_init[1] - 0.01, down_init[1] + 0.01))
+        bounds.append((down_init[2] - 0.01, down_init[2] + 0.01))
+        bounds.extend([(-0.00001, 0.00001)] * (num_down - 3))
+        # 光源参数边界
+        bounds.append((-1.0, 1))  # a
+        bounds.extend([(-1.0, 1.0)] * 3) # l1, l2, l3
+
     print(f"Total parameters to optimize: {len(bounds)}")
 
-    # --- c. (修改) 优化器配置，切换为差分进化 ---
-    optimizer_config = {
-        'method': 'differential_evolution', # 明确方法
-        'maxiter': 20000,          # 迭代的“代数”
-        'popsize': 60,           # 每一代的“种群”大小 (popsize * len(params) 是每代的函数评估次数)
-        'tol': 0.000001,             # 收敛容忍度
-        'bounds': bounds,        # 传入边界！
-        'workers': -1            # 使用所有CPU核心并行计算以加速
-    }
-    
-    # --- d. 优化前的可视化 (与 nelder_mead_Opti 相同) ---
-    print("\n--- Visualizing Before Optimization ---")
-    initial_lc = LC_device(**initial_params_config)
-    vis_sources = [Point_light_source(**cfg) for cfg in vis_light_sources_config]
-    evaluator = PlanarLossEvaluator(**evaluator_config)
-    visualize_ray_tracing("Initial Parameters", initial_lc, vis_sources, evaluator, rays_to_plot_per_source=20)
-    
-    # --- e. 运行优化 (调用新的全局优化函数) ---
-    result = de_run_opti(
-        initial_params_config,
-        opt_light_sources_config,
-        evaluator_config,
-        optimizer_config,
-        constraints_config
+    # --- 5. 实例化 Objective 评估器 ---
+    # 确保将所有需要的类和配置传入
+    objective_instance = Objective(
+        lc_class=LC_device,
+        light_source_class=Point_light_source,
+        loss_evaluator=PlanarLossEvaluator(**evaluator_config),
+        initial_params_config=initial_params_config,
+        initial_light_control_params=light_init,
+        constraints_config=constraints_config
     )
 
-    # --- f. 打印和可视化最终结果 (与 nelder_mead_Opti 相同) ---
+    # --- 6. (可选) 优化前可视化 ---
+    if visualize_before_run:
+        print("\n--- Visualizing Before Optimization ---")
+        initial_lc = LC_device(**initial_params_config)
+        # 动态生成用于可视化的光源
+        vis_light_sources_config = calculate_light_sources_from_params(*light_init)
+        vis_sources = [Point_light_source(**cfg) for cfg in vis_light_sources_config]
+        evaluator = PlanarLossEvaluator(**evaluator_config)
+        visualize_ray_tracing("Initial State", initial_lc, vis_sources, evaluator, rays_to_plot_per_source=20)
+
+    # --- 7. 设置 TQDM 和回调函数 ---
+    pbar = tqdm(total=optimizer_static_config.get('maxiter', 100), desc="Diff. Evolution")
+
+    def de_callback(xk, convergence):
+        """
+        在每一代优化结束时被调用，用于更新进度条。
+        """
+        loss = objective_instance(xk) 
+        pbar.set_postfix({
+            'loss': f'{objective_instance.last_loss:.4f}',
+            'penalty': f'{objective_instance.last_penalty:.4f}',
+            'convergence': f'{convergence:.4f}'
+        })
+        pbar.update(1)
+    # --- 7. 运行优化 ---
+    print("\n--- Starting Scipy Differential Evolution ---")
+    result = differential_evolution(
+        func=objective_instance,
+        bounds=bounds,
+        x0=initial_params_vector,
+        callback=de_callback, # 传入回调函数
+        **optimizer_static_config
+    )
+    pbar.close() # 确保在优化结束后关闭进度条
+
+    # --- 8. 打印、保存和可视化最终结果 ---
     print("\n" + "="*50 + "\nOptimization Finished!" + "\n" + "="*50)
-    print(f"Success: {result.success}\nMessage: {result.message}\nFinal Loss: {result.fun:.6f}")
+    print(f"Success: {result.success}\nMessage: {result.message}\nFinal Score: {result.fun:.6f}")
     
     best_params = result.x
+    np.save(save_path, best_params)
+    print(f"\nBest parameters saved to: {save_path}")
+
     best_up_params = best_params[:num_up]
-    best_down_params = best_params[num_up:]
+    best_down_params = best_params[num_up : num_up + num_down]
+    best_light_params = best_params[num_up + num_down:]
     
-    print(f"\nBest Up-Surface Parameters:\n{np.round(best_up_params, 4)}")
-    print(f"Best Down-Surface Parameters:\n{np.round(best_down_params, 4)}")
+    print(f"\nBest Up-Surface Parameters:\n{np.round(best_up_params, 5)}")
+    print(f"Best Down-Surface Parameters:\n{np.round(best_down_params, 5)}")
+    print(f"Best Light Control Parameters (a, l1, l2, l3):\n{np.round(best_light_params, 5)}")
     print("="*50 + "\n")
     
     print("--- Visualizing After Optimization ---")
@@ -438,149 +646,42 @@ def differential_evolution_Opti():
     final_params_config['up_surface_params'] = best_up_params
     final_params_config['down_surface_params'] = best_down_params
     final_lc = LC_device(**final_params_config)
-    np.save('PMMA_optimize/output/optimized_params_DE.npy', best_params)
-    visualize_ray_tracing("Optimized Parameters (DE)", final_lc, vis_sources, evaluator, rays_to_plot_per_source=20)
-# ============================================================================
-# 步骤 5: 导出stl
-# ============================================================================
-def generate_lc_device_stl(lc_device: LC_device, output_filename: str, density: int = 100):
-    """
-    根据LC_device实例生成一个闭合的实体STL模型。
-
-    :param lc_device: LC_device类的一个实例。
-    :param output_filename: 输出的STL文件名。
-    :param density: XY平面的网格密度，数值越高模型越精细。
-    """
-    print(f"正在生成STL模型，密度为 {density}x{density}...")
-
-    # --- 1. 生成顶点网格 ---
-    x = np.linspace(-lc_device.bound_x / 2., lc_device.bound_x / 2., density)
-    y = np.linspace(-lc_device.bound_y / 2., lc_device.bound_y / 2., density)
-    xx, yy = np.meshgrid(x, y)
-
-    # --- 2. 计算上下表面顶点 ---
-    # 向量化计算所有Z坐标
-    zz_up = lc_device.up_surface_fun(xx, yy)
-    zz_down = lc_device.down_surface_fun(xx, yy)
     
-    # 将顶点数据整合为 (density, density, 3) 的数组
-    up_vertices = np.stack([xx, yy, zz_up], axis=-1)
-    down_vertices = np.stack([xx, yy, zz_down], axis=-1)
-
-    # --- 3. 构建上下表面三角面片 (向量化) ---
-    def create_surface_faces(vertices, reverse_winding=False):
-        """从顶点网格高效创建三角面片"""
-        # (density-1, density-1) 个小方格
-        quads_v1 = vertices[:-1, :-1]
-        quads_v2 = vertices[1:, :-1]
-        quads_v3 = vertices[:-1, 1:]
-        quads_v4 = vertices[1:, 1:]
-
-        num_quads = (density - 1) * (density - 1)
-        faces1 = np.zeros((num_quads, 3, 3))
-        faces2 = np.zeros((num_quads, 3, 3))
-
-        # 第一个三角形 (v1, v2, v4)
-        faces1[:, 0, :] = quads_v1.reshape(-1, 3)
-        faces1[:, 1, :] = quads_v2.reshape(-1, 3)
-        faces1[:, 2, :] = quads_v4.reshape(-1, 3)
-
-        # 第二个三角形 (v1, v4, v3)
-        faces2[:, 0, :] = quads_v1.reshape(-1, 3)
-        faces2[:, 1, :] = quads_v4.reshape(-1, 3)
-        faces2[:, 2, :] = quads_v3.reshape(-1, 3)
-        
-        if reverse_winding:
-            # 翻转顶点顺序以使法向量朝外
-            return np.concatenate([faces1[:, ::-1, :], faces2[:, ::-1, :]], axis=0)
-        else:
-            return np.concatenate([faces1, faces2], axis=0)
-
-    top_faces = create_surface_faces(up_vertices)
-    bottom_faces = create_surface_faces(down_vertices, reverse_winding=True)
-
-    # --- 4. 构建侧壁三角面片 (向量化) ---
-    def create_side_faces(top_v, bottom_v):
-        """连接上下边界以创建侧壁"""
-        all_side_faces = []
-        # 遍历四条边: 右, 左, 上, 下
-        boundaries = [
-            (top_v[:, -1], bottom_v[:, -1]),   # 右边 (x=max)
-            (top_v[::-1, 0], bottom_v[::-1, 0]), # 左边 (x=min), 反转顺序保持连接性
-            (top_v[-1, ::-1], bottom_v[-1, ::-1]), # 上边 (y=max), 反转顺序
-            (top_v[0, :], bottom_v[0, :])     # 下边 (y=min)
-        ]
-
-        for top_edge, bottom_edge in boundaries:
-            edge_len = len(top_edge) - 1
-            side_faces1 = np.zeros((edge_len, 3, 3))
-            side_faces2 = np.zeros((edge_len, 3, 3))
-            
-            # 每个边上的小方格
-            v1 = top_edge[:-1]
-            v2 = bottom_edge[:-1]
-            v3 = bottom_edge[1:]
-            v4 = top_edge[1:]
-            
-            # 三角形1: (v1, v2, v3)
-            side_faces1[:, 0, :] = v1
-            side_faces1[:, 1, :] = v2
-            side_faces1[:, 2, :] = v3
-
-            # 三角形2: (v1, v3, v4)
-            side_faces2[:, 0, :] = v1
-            side_faces2[:, 1, :] = v3
-            side_faces2[:, 2, :] = v4
-            
-            all_side_faces.append(side_faces1)
-            all_side_faces.append(side_faces2)
-        
-        return np.concatenate(all_side_faces, axis=0)
-
-    side_faces = create_side_faces(up_vertices, down_vertices)
+    # 使用优化后的最佳参数动态生成光源用于最终可视化
+    final_light_sources_config = calculate_light_sources_from_params(*best_light_params)
+    final_sources = [Point_light_source(**cfg) for cfg in final_light_sources_config]
+    final_evaluator = PlanarLossEvaluator(**evaluator_config)
     
-    # --- 5. 整合所有面片并进行坐标变换 ---
-    all_faces_local = np.concatenate([top_faces, bottom_faces, side_faces], axis=0)
-    
-    # 从 (num_faces, 3, 3) 变为 (num_faces * 3, 3) 以便进行矩阵运算
-    num_faces_total = all_faces_local.shape[0]
-    all_vertices_local = all_faces_local.reshape(num_faces_total * 3, 3)
+    visualize_ray_tracing("Optimized State (DE)", final_lc, final_sources, final_evaluator, rays_to_plot_per_source=20)
 
-    # 应用旋转和平移 (向量化)
-    # world_coord = Rotation @ local_coord + Translation
-    rotation_matrix = lc_device.OptEl_to_world_rotation_matrix
-    translation_vector = lc_device.OptEl_to_world_translation_matrix
-    
-    # @ 是矩阵乘法运算符
-    all_vertices_world = (rotation_matrix @ all_vertices_local.T).T + translation_vector.T
-
-    # 将顶点数据重塑回 (num_faces, 3, 3)
-    all_faces_world = all_vertices_world.reshape(num_faces_total, 3, 3)
-
-    # --- 6. 创建并导出STL ---
-    solid_mesh = mesh.Mesh(np.zeros(all_faces_world.shape[0], dtype=mesh.Mesh.dtype))
-    solid_mesh.vectors = all_faces_world
-    
-    solid_mesh.save(output_filename)
-    print(f"模型已成功保存至: {output_filename}")
-    print(f"总面数: {num_faces_total}")
-
+    return result
 
 # ==============================================================================
 #                                 使用示例
 # ============================================================================== 
 if __name__ == '__main__':
 
-    # differential_evolution_Opti() # 使用差分进化优化
-    # nelder_mead_Opti()            # 使用Nelder-Mead优化
-    lcup_surface_params=np.load('PMMA_optimize/output/optimized_params_DE_0913_BEST.npy')[:12]
-    lcup_surface_params[0]=39.54
-    lcdown_surface_params=np.load('PMMA_optimize/output/optimized_params_DE_0913_BEST.npy')[12:]
-    device=LC_device(up_surface_params=lcup_surface_params,
-                     down_surface_params=lcdown_surface_params,
-                     bound=[14,1],
-                     )
-    device.generate_lc_device_stl(
-        output_filename='PMMA_optimize/output/lc_device_model.stl', 
-        density=100  # 提高密度以获得更平滑的模型
+    # INITIAL_PARAMS_FILE = 'PMMA_optimize/output/initial_params_with_light.npy'
+    OPTIMIZED_PARAMS_FILE = 'PMMA_optimize/output/optimized_params_final.npy'
+
+
+    # 调用重写后的优化函数
+    differential_evolution_Opti(
+        save_path=OPTIMIZED_PARAMS_FILE,
+        visualize_before_run=False # 在正式运行时可以设为 False 以节省时间
     )
+
+    # nelder_mead_Opti()            # 使用Nelder-Mead优化
+
+    #导出stl
+    # lcup_surface_params=np.load('PMMA_optimize/output/optimized_params_DE_0913_BEST.npy')[:12]
+    # lcup_surface_params[0]=39.54
+    # lcdown_surface_params=np.load('PMMA_optimize/output/optimized_params_DE_0913_BEST.npy')[12:]
+    # device=LC_device(up_surface_params=lcup_surface_params,
+    #                  down_surface_params=lcdown_surface_params,
+    #                  bound=[14,1],
+    #                  )
+    # device.generate_lc_device_stl(
+    #     output_filename='PMMA_optimize/output/lc_device_model.stl', 
+    #     density=100  # 提高密度以获得更平滑的模型
+    # )
