@@ -1350,13 +1350,15 @@ class LC_device(BFP):
             cmap='viridis', edgecolor='none')
     def trace_ray(self, p_wcs, n_wcs):
         """
-        追踪光线在 LC 中的路径，输出内部坐标系下的光线位置和方向
+        追踪光线在 LC 中的路径。
+        修改版逻辑：保留所有通过第一个面的光线。
+        如果光线未击中第二个面，则将其方向向量延长，并报告其最终状态。
         :param p_wcs:
         :param n_wcs:
-        :return:
+        :return: pl2_wcs, n3_wcs, pl1_wcs, n2_wcs, final_mask
         """
         num_rays_initial = p_wcs.shape[1]
-    
+
         # 坐标变换
         pl0_bcs = self.world_coordinate_to_OptEl_coordinate(p_wcs)
         n1_bcs = self.world_coordinate_to_OptEl_coordinate(n_wcs, True)
@@ -1368,14 +1370,14 @@ class LC_device(BFP):
             pl0_bcs, n1_bcs, self.down_surface_fun, min_range=-100, max_range=100
         )
         
-        # 筛选通过第一个边界的光线
+        # 筛选通过第一个边界的光线 (这些是所有需要保留的光线)
         pl1_after_filter1, (n1_after_filter1,), mask1 = filter_rays_by_boundary(
             pl1_bcs_all, (0, self.bound_x), (0, self.bound_y), n1_bcs
         )
 
+        # 如果没有任何光线击中第一个面，直接返回
         if pl1_after_filter1.shape[1] == 0:
             print("Warning: No rays hit the valid area of the first surface.")
-            # 返回空的数组和一个全为False的掩码
             empty_arr = np.array([]).reshape(3, 0)
             final_mask = np.full(num_rays_initial, False, dtype=bool)
             return empty_arr, empty_arr, empty_arr, empty_arr, final_mask
@@ -1388,52 +1390,78 @@ class LC_device(BFP):
         )
 
         # ====================================================================
-        # 第二步: 基于第一次筛选的结果，计算与第二个面的交点并进行第二次筛选
+        # ## 核心修改部分开始 ##
+        # ====================================================================
+        # 第二步: 计算与第二个面的交点，并“分类”光线，而不是“筛选”
         # ====================================================================
         _, pl2_bcs_from_valid_1 = calculate_line_surface_intersection_points_by_binary_search(
             pl1_after_filter1, n2_after_filter1, self.up_surface_fun, min_range=-100, max_range=100
         )
         
-        # --- 关键修改 ---
-        # 这次筛选的输入是pl2的交点，但同时筛选的附加数组是第一次筛选后的结果
-        pl2_final, (pl1_final, n2_final), mask2 = filter_rays_by_boundary(
-            pl2_bcs_from_valid_1,
-            (0, self.bound_x),
-            (0, self.bound_y),
-            pl1_after_filter1,   # 将第一次的结果传入，进行同步筛选
-            n2_after_filter1     # 将第一次的结果传入，进行同步筛选
+        # 获取一个布尔掩码，用于区分击中和错过的光线
+        # 注意：这里我们只需要掩码，所以忽略返回的其他数组
+        _, _, mask_hit_surface2 = filter_rays_by_boundary(
+            pl2_bcs_from_valid_1, (0, self.bound_x), (0, self.bound_y)
         )
+        mask_miss_surface2 = ~mask_hit_surface2
         
-        if pl2_final.shape[1] == 0:
-            print("Warning: No rays hit the valid area of the second surface.")
-            empty_arr = np.array([]).reshape(3, 0)
-            final_mask = np.full(num_rays_initial, False, dtype=bool)
-            return empty_arr, empty_arr, empty_arr, empty_arr, final_mask
+        # 创建空的数组用于存放最终合并的结果
+        num_valid_rays_1 = pl1_after_filter1.shape[1]
+        pl2_bcs_combined = np.zeros((3, num_valid_rays_1))
+        n3_bcs_combined = np.zeros((3, num_valid_rays_1))
+
+        # --------------------------------------------------------------------
+        # 分组处理 A: 成功击中第二个面的光线 (原始逻辑)
+        # --------------------------------------------------------------------
+        if np.any(mask_hit_surface2):
+            # 提取出击中的光线
+            pl2_hit = pl2_bcs_from_valid_1[:, mask_hit_surface2]
+            n2_hit = n2_after_filter1[:, mask_hit_surface2]
+            
+            # 计算最终出射光线的法向量和方向
+            n_LC_up_side = self.up_surface_gradient_fun(pl2_hit[0, :], pl2_hit[1, :])
+            n3_hit = calculate_reflection_vector(
+                incident_direction=n2_hit,
+                normal_direction=n_LC_up_side
+            )
+            
+            # 将处理结果存入合并数组的对应位置
+            pl2_bcs_combined[:, mask_hit_surface2] = pl2_hit
+            n3_bcs_combined[:, mask_hit_surface2] = n3_hit
+
+        # --------------------------------------------------------------------
+        # 分组处理 B: 未击中第二个面的光线 (新逻辑)
+        # --------------------------------------------------------------------
+        if np.any(mask_miss_surface2):
+            # 提取出错过的光线
+            pl1_miss = pl1_after_filter1[:, mask_miss_surface2]
+            n2_miss = n2_after_filter1[:, mask_miss_surface2]
+            
+            # 按照新规则计算最终状态
+            # 最终位置 = 第一个面交点 + 延伸方向 * 距离
+            pl2_miss = pl1_miss + n2_miss * 30
+            # 最终方向 = 第一次折射后的方向
+            n3_miss = n2_miss
+            
+            # 将处理结果存入合并数组的对应位置
+            pl2_bcs_combined[:, mask_miss_surface2] = pl2_miss
+            n3_bcs_combined[:, mask_miss_surface2] = n3_miss
             
         # ====================================================================
-        # 第三步: 计算最终出射方向并生成最终掩码
+        # ## 核心修改部分结束 ##
         # ====================================================================
-        # 计算最终出射光线的法向量和方向
-        n_LC_up_side = self.up_surface_gradient_fun(pl2_final[0, :], pl2_final[1, :])
-        n3_final = calculate_reflection_vector(
-            incident_direction=n2_final,
-            normal_direction=n_LC_up_side
-        )
-        
-        # --- 生成可用于筛选初始光线的 final_mask ---
-        final_mask = np.full(num_rays_initial, False, dtype=bool)
-        valid_indices_1 = np.where(mask1)[0]
-        final_valid_indices = valid_indices_1[mask2] # 将局部掩码 mask2 映射回全局索引
-        final_mask[final_valid_indices] = True
+
+        # 第三步: 生成最终掩码 (现在它代表所有通过第一个面的光线)
+        final_mask = mask1
         
         # ====================================================================
         # 第四步: 坐标变换并返回紧凑的结果
         # ====================================================================
-        # 此时 pl1_final, n2_final, pl2_final, n3_final 的光线数完全相同
-        pl1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_final)
-        n2_wcs = self.OptEl_coordinate_to_world_coordinate(n2_final, True)
-        pl2_wcs = self.OptEl_coordinate_to_world_coordinate(pl2_final)
-        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_final, True)
+        # 此时，pl1_after_filter1, n2_after_filter1, pl2_bcs_combined, n3_bcs_combined 的光线数和顺序完全一致
+        pl1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_after_filter1)
+        n2_wcs = self.OptEl_coordinate_to_world_coordinate(n2_after_filter1, True)
+        pl2_wcs = self.OptEl_coordinate_to_world_coordinate(pl2_bcs_combined)
+        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_bcs_combined, True)
         
         return pl2_wcs, n3_wcs, pl1_wcs, n2_wcs, final_mask
     

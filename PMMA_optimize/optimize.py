@@ -52,94 +52,82 @@ def visualize_ray_tracing(title, lc_device, light_sources, evaluator, rays_to_pl
 
     # 设置一个好的观察视角
     ax.view_init(elev=10, azim=-70)
+    ax.set_proj_type('ortho')
     plt.show()
-def calculate_light_sources_from_params(a, l1, l2, l3, num_rays=500, emission_angle_deg=30):
+def calculate_light_sources_from_params(a, l1, l2, l3, num_rays=500, emission_angle_deg=60):
     """
     根据斜率a和三个长度比例l1,l2,l3，计算三个光源的位置和姿态。
+    (该版本使用了更清晰、更直接的旋转逻辑)
 
     :param a: 直线的斜率 (z+3.25 = a*(x-7.23))
     :param l1, l2, l3: 三个光源在线段上的相对位置比例 [-1, 1]
     :return: light_sources_config 列表
     """
-    # --- a. 计算直线与矩形的交点 ---
+    # --- a. 计算直线与矩形的交点 (此部分逻辑不变) ---
     rect_bounds = {'x_min': 2.8, 'x_max': 11.66, 'z_min': -5.5, 'z_max': -1.0}
-    
     intersections = []
-    
     # 直线方程: z = a*x - 7.23*a - 3.25
-    # 检查与 x 边界的交点
     x_at_xmin = rect_bounds['x_min']
     z_at_xmin = a * x_at_xmin - 7.23 * a - 3.25
     if rect_bounds['z_min'] <= z_at_xmin <= rect_bounds['z_max']:
         intersections.append(np.array([x_at_xmin, z_at_xmin]))
-        
     x_at_xmax = rect_bounds['x_max']
     z_at_xmax = a * x_at_xmax - 7.23 * a - 3.25
     if rect_bounds['z_min'] <= z_at_xmax <= rect_bounds['z_max']:
         intersections.append(np.array([x_at_xmax, z_at_xmax]))
-
-    # 检查与 z 边界的交点
-    if a != 0: # 避免除以零
+    if a != 0:
         z_at_zmin = rect_bounds['z_min']
         x_at_zmin = (z_at_zmin + 7.23 * a + 3.25) / a
         if rect_bounds['x_min'] <= x_at_zmin <= rect_bounds['x_max']:
             intersections.append(np.array([x_at_zmin, z_at_zmin]))
-
         z_at_zmax = rect_bounds['z_max']
         x_at_zmax = (z_at_zmax + 7.23 * a + 3.25) / a
         if rect_bounds['x_min'] <= x_at_zmax <= rect_bounds['x_max']:
             intersections.append(np.array([x_at_zmax, z_at_zmax]))
 
-    # 应该恰好找到两个交点形成线段
-    if len(intersections) != 2:
-        # 如果找不到两个交点（例如直线完全在矩形外），返回一个空配置或错误
-        # 在优化中，这种情况可能会得到一个极差的分数，从而被算法淘汰
+    # 去重并确保只有两个交点
+    unique_intersections = np.unique(np.array(intersections), axis=0)
+    if len(unique_intersections) != 2:
         return []
-        
-    p_start, p_end = intersections
     
-    # --- b. 计算线段中心和半长向量 ---
+    p_start, p_end = unique_intersections
+    
+    # --- b. 计算线段中心和半长向量 (此部分逻辑不变) ---
     segment_center = (p_start + p_end) / 2.0
     segment_half_vector = (p_end - p_start) / 2.0
 
-    # --- c. 计算光源位置 ---
+    # --- c. 计算光源位置 (此部分逻辑不变) ---
     ratios = [l1, l2, l3]
     positions_xz = [segment_center + r * segment_half_vector for r in ratios]
-    
-    # 转换为三维列向量 (x, 0, z)
     positions_3d = [np.array([pos[0], 0, pos[1]]).reshape(-1, 1) for pos in positions_xz]
 
-    # --- d. 计算光源姿态 (旋转矩阵) ---
-    # 方向向量是线段的方向，指向z轴正半轴，所以我们确保dz为正
-    direction_vec_xz = p_end - p_start
-    if np.linalg.norm(direction_vec_xz) < 1e-9:
-        # 如果线段长度几乎为零，则使用默认方向（沿X轴）
-        direction_vec_xz = np.array([1.0, 0.0])
-    else:
-        if direction_vec_xz[1] < 0: # z分量为负
-            direction_vec_xz = -direction_vec_xz
-        # 将方向向量单位化
-        direction_vec_xz = direction_vec_xz / np.linalg.norm(direction_vec_xz)
-
-    # 从单位方向向量中获取 dx 和 dz
-    dx, dz = direction_vec_xz[0], direction_vec_xz[1]
-
-    # 构建新的坐标系
-    # 新的 X' 轴是线段的方向
-    new_x_axis = np.array([dx, 0, dz])
-    # 新的 Y' 轴保持不变 (绕Y轴旋转)
-    new_y_axis = np.array([0, 1, 0])
-    # 新的 Z' 轴垂直于线段方向且“朝上”（在XZ平面内旋转90度）
-    new_z_axis = np.array([-dz, 0, dx])
-
-    # 将新的基准坐标轴作为列向量组合成旋转矩阵
-    # np.stack([...], axis=1) 可以方便地实现这一点
-    rotation_matrix = np.stack([new_x_axis, new_y_axis, new_z_axis], axis=1)
-
-    # 现在 rotation_matrix 会将光源的默认 Z 轴 (0,0,1) 旋转到 new_z_axis 的方向，
-    # 同时将默认的 X 轴 (1,0,0) 旋转到 new_x_axis 的方向。
+    # ####################################################################
+    # ## d. 计算光源姿态 (旋转矩阵) - 全新、更清晰的逻辑 ##
+    # ####################################################################
     
-    # --- e. 构建光源配置列表 ---
+    # 约束1: 光源原始朝向为 Z 轴正方向 [0, 0, 1]
+    # 约束2: 最终朝向需要与斜率为 a 的直线垂直，且仅绕 Y 轴旋转
+    
+    # 斜率为 a 的直线，其在 XZ 平面的方向向量为 [1, a]
+    # 与其垂直的方向向量为 [-a, 1] (因为点积 1*(-a) + a*1 = 0)
+    # 因此，光源的目标朝向向量 (在3D中) 是 [-a, 0, 1]
+    
+    # 计算旋转该方向所需的 sin 和 cos 值
+    norm = np.sqrt(a**2 + 1)
+    cos_theta = 1.0 / norm
+    sin_theta = -a / norm
+    
+    # 根据 sin 和 cos 直接构建标准的绕 Y 轴旋转矩阵
+    # Ry(θ) = [[cos(θ), 0, sin(θ)], [0, 1, 0], [-sin(θ), 0, cos(θ)]]
+    rotation_matrix = np.array([
+        [cos_theta,  0,  -sin_theta],
+        [0,          1,  0         ],
+        [sin_theta, 0,  cos_theta]
+    ])
+    
+    # ####################################################################
+    
+    # --- e. 构建光源配置列表 (此部分逻辑不变) ---
     light_sources_config = []
     for pos in positions_3d:
         light_sources_config.append({
@@ -150,6 +138,7 @@ def calculate_light_sources_from_params(a, l1, l2, l3, num_rays=500, emission_an
         })
         
     return light_sources_config
+
 
 class Objective:
     """
@@ -519,7 +508,7 @@ def differential_evolution_Opti(
         'sample_resolution': 25, 'penalty_weight': 1000.0
     }
     optimizer_static_config = {
-        'maxiter': 1, 'popsize': 20, 'tol': 0.000001, 'workers': -1
+        'maxiter': 1000, 'popsize': 20, 'tol': 0.000001, 'workers': -1
     }
 
     
@@ -532,7 +521,7 @@ def differential_evolution_Opti(
         initial_params_vector = np.concatenate([
             np.array([39.54, -1.4,-0.1] + [0]*9), # 上表面
             np.array([0]*12),                    # 下表面
-            np.array([-0.1, 0.0, -0.5, 0.5])       # 光源控制参数 (a, l1, l2, l3)
+            np.array([-0.1, -0.5,0.0,  0.5])       # 光源控制参数 (a, l1, l2, l3)
         ])
     else:
         initial_params_vector = np.load(initial_params_path)
@@ -544,7 +533,7 @@ def differential_evolution_Opti(
         initial_params_vector = np.concatenate([
             np.array([39.54, -1.4,-0.1] + [0]*9), # 上表面
             np.array([0]*12),                    # 下表面
-            np.array([-0.1, 0.0, -0.5, 0.5])       # 光源控制参数 (a, l1, l2, l3)
+            np.array([-0.1, -0.5,0.0,  0.5])       # 光源控制参数 (a, l1, l2, l3)
         ])
 
     up_init = initial_params_vector[:num_up]
@@ -573,8 +562,10 @@ def differential_evolution_Opti(
         bounds.append((down_init[2] - 0.01, down_init[2] + 0.01))
         bounds.extend([(-0.00001, 0.00001)] * (num_down - 3))
         # 光源参数边界
-        bounds.append((-1.0, 1))  # a
-        bounds.extend([(-1.0, 1.0)] * 3) # l1, l2, l3
+        bounds.append((-0.2, 0.2))  # a
+        bounds.append((-1.0, -0.33333)) # l1
+        bounds.append((-0.33333, 0.33333)) # l2
+        bounds.append((0.33333, 1.0)) # l3
 
     print(f"Total parameters to optimize: {len(bounds)}")
 
