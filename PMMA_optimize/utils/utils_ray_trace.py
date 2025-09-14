@@ -1473,7 +1473,7 @@ class Point_light_source(OptElement):
     该光源从一个指定位置，向一个半球形或锥形区域内均匀发射光线。
     """
     def __init__(self, 
-                num_rays=1000, 
+                num_rays=1000000, 
                 emission_angle_deg=90, 
                 color='red',
                 OptEl_to_world_translation_matrix=np.zeros((3,1)),

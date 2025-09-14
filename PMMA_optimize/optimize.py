@@ -651,17 +651,59 @@ def differential_evolution_Opti(
 #                                 使用示例
 # ============================================================================== 
 if __name__ == '__main__':
+    ######验证参数######
+    INITIAL_PARAMS_FILE = 'PMMA_optimize/output/optimized_params_final.npy'
+    evaluator_config = {
+        'plane_normal': np.array([1, 0, 0]), 'plane_center': np.array([0, 0, 29]),
+        'plane_width': 1, 'plane_height': 20, 'weights': (0.6, 0.1, 0.3), 'grid_size': 30
+    }
+    constraints_config = {
+        'x_range': [0, 11.2], 'y_range': [0, 1],
+        'sample_resolution': 25, 'penalty_weight': 1000.0
+    }
+    initial_params_vector = np.load(INITIAL_PARAMS_FILE)
+    # initial_params_vector[3]=0
+    # initial_params_vector[8]=0
+    # 定义参数结构
+    num_up, num_down, num_light = 12, 12, 4
+    # 加载参数
+    up_init = initial_params_vector[:num_up]
+    down_init = initial_params_vector[num_up : num_up + num_down]
+    light_init = initial_params_vector[num_up + num_down:]
 
-    # INITIAL_PARAMS_FILE = 'PMMA_optimize/output/initial_params_with_light.npy'
-    OPTIMIZED_PARAMS_FILE = 'PMMA_optimize/output/optimized_params_final.npy'
+    initial_params_config = {
+        'up_surface_params': up_init,
+        'down_surface_params': down_init,
+        'bound': [15.1, 1],
+        'OptEl_to_world_translation_matrix': np.array([0, -0.5, 0]).reshape(-1, 1),
+    }
 
-
-    # 调用重写后的优化函数
-    differential_evolution_Opti(
-        save_path=OPTIMIZED_PARAMS_FILE,
-        visualize_before_run=False # 在正式运行时可以设为 False 以节省时间
+    objective_instance = Objective(
+        lc_class=LC_device,
+        light_source_class=Point_light_source,
+        loss_evaluator=PlanarLossEvaluator(**evaluator_config),
+        initial_params_config=initial_params_config,
+        initial_light_control_params=light_init,
+        constraints_config=constraints_config
     )
+    loss_average=0
+    for i in range(100):
+        loss=objective_instance(initial_params_vector)
+        loss_average+=loss
+    loss_average/=100
+    print("average loss:",loss_average)
+    ######差分进化优化######
+    # INITIAL_PARAMS_FILE = 'PMMA_optimize/output/initial_params_with_light.npy'
+    # OPTIMIZED_PARAMS_FILE = 'PMMA_optimize/output/optimized_params_final.npy'
 
+
+    # # 调用重写后的优化函数
+    # differential_evolution_Opti(
+    #     save_path=OPTIMIZED_PARAMS_FILE,
+    #     visualize_before_run=False # 在正式运行时可以设为 False 以节省时间
+    # )
+
+    ######Nelder-Mead优化######
     # nelder_mead_Opti()            # 使用Nelder-Mead优化
 
     #导出stl
