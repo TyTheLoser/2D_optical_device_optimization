@@ -677,7 +677,7 @@ if __name__ == '__main__':
         'bound': [15.1, 1],
         'OptEl_to_world_translation_matrix': np.array([0, -0.5, 0]).reshape(-1, 1),
     }
-
+    #测试分支
     objective_instance = Objective(
         lc_class=LC_device,
         light_source_class=Point_light_source,
