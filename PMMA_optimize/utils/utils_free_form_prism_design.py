@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sympy as sp
 from typing import Tuple
+from matplotlib.collections import LineCollection
 
 # --- 点集生成函数 ---
 
@@ -378,3 +379,46 @@ def filter_rays_by_boundary(
     points_inside = points_to_check[:, mask]
     filtered_arrays = tuple(arr[:, mask] for arr in arrays_to_filter)
     return points_inside, filtered_arrays, mask
+def plot_2d_rays(ax, start_points, end_points, num_to_plot=100000, **kwargs):
+    """高效绘制2D光线路径。"""
+    num_rays = min(start_points.shape[1], end_points.shape[1])
+    if num_rays == 0: return
+    indices = np.random.choice(num_rays, min(num_rays, num_to_plot), replace=False)
+    segments = np.array([start_points[:, indices].T, end_points[:, indices].T]).transpose((1, 0, 2))
+    ax.add_collection(LineCollection(segments, **kwargs))
+def visualize_scene(ax, title, source_list, device, evaluator, rays, hit_points):
+    """
+    可视化整个光学场景，支持多个光源。
+
+    Args:
+        ax (matplotlib.axes.Axes): 绘图轴。
+        title (str): 图像标题。
+        source_list (list): 包含一个或多个光源对象的列表。
+        device (object): 光学器件对象。
+        evaluator (object): 评估平面对象。
+        rays (tuple): 包含光线路径数据的元组 (p0, p1, p2, n3)。
+        hit_points (numpy.ndarray): 在评估平面上的命中点坐标。
+    """
+    p0, p1, p2, n3 = rays
+    ax.set_facecolor('black')
+    ax.set_title(title, fontsize=16)
+    plot_2d_rays(ax, p0, p1, colors='orange', linewidths=0.4, alpha=0.6)
+    plot_2d_rays(ax, p1, p2, colors='deepskyblue', linewidths=0.4, alpha=0.7)
+    p3_extended = p2 + n3 * 40
+    plot_2d_rays(ax, p2, p3_extended, colors='lime', linewidths=0.5, alpha=0.8)
+    # 遍历光源列表并绘制每个光源
+    for source in source_list:
+        source.plot_element_2d(ax, zorder=10)
+
+    device.plot_element_2d(ax, color='cyan', label='透镜 (Lens)', zorder=5)
+    evaluator.plot_element_2d(ax, color='magenta', linestyle='--', linewidth=3, zorder=10)
+
+    
+
+    if hit_points.shape[1] > 0:
+        ax.scatter(hit_points[0, :], hit_points[1, :], s=5, c='red', alpha=0.8, label='命中点 (Hits)', zorder=11)
+
+    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
+    ax.legend(); ax.set_aspect('equal', adjustable='box')
+    ax.grid(True, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+    ax.set_xlim(-5, 20); ax.set_ylim(-5, 45)

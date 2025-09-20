@@ -4,9 +4,11 @@ from abc import abstractmethod
 from enum import Enum
 import numpy as np
 import scipy as sp
+from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
 from scipy.spatial.transform import Rotation as R
+
 
 # =============================================================================
 # 1. 2D旋转与坐标变换辅助函数
@@ -154,12 +156,12 @@ class LC_device(OptElement):
     """
     2D自由曲面透镜类，使用牛顿法进行快速光线-曲线求交。
     """
-    def __init__(self, up_surface_params, down_surface_params, bound_x=11.2, **kwargs):
+    def __init__(self, up_surface_params, down_surface_params, bound=[0,15.2], **kwargs):
         super().__init__(**kwargs)
         self.n1, self.n2, self.n3 = 1.0, 1.49, 1.0
         self.up_surface_params = np.array(up_surface_params)
         self.down_surface_params = np.array(down_surface_params)
-        self.bound_x = bound_x
+        self.bound = bound
     
     def _poly_calc(self, x, params):
         """计算多项式 y = c0 + c1*x + c2*x^2 + ..."""
@@ -212,70 +214,105 @@ class LC_device(OptElement):
         return t
 
     def trace_ray(self, p_wcs, n_wcs):
-        """追踪光线穿过2D透镜，并返回各阶段对应的点。"""
-        # 1. 坐标转换
+        """
+        Traces rays through a 2D lens and returns the points at each stage.
+        
+        Modified Logic: This version retains all rays that successfully intersect the first
+        surface. If a ray fails to intersect the second surface, its final state is
+        calculated by extending it a fixed distance forward.
+        """
+        # 1. Coordinate Transformation
         pl0_bcs = self.world_coordinate_to_OptEl_coordinate(p_wcs)
         n1_bcs = self.world_coordinate_to_OptEl_coordinate(n_wcs, is_vector=True)
         
-        # 2. 与下表面求交
+        # 2. Intersection with the lower surface
         t1 = self._find_intersection_newton(pl0_bcs, n1_bcs, self.down_surface_fun, lambda x: self._poly_derivative(x, self.down_surface_params))
         pl1_bcs = pl0_bcs + t1 * n1_bcs
         
-        # 3. 第一次筛选：基于边界
-        # 此时，pl0_bcs 和 n1_bcs 仍然是全部的 10000 条光线
+        # 3. First Filtering: Based on boundary of the lower surface
         pl1_filtered, (pl0_filtered, n1_filtered,), mask1 = filter_rays_by_boundary(
-            pl1_bcs, (-self.bound_x/2, self.bound_x/2), pl0_bcs, n1_bcs
+            pl1_bcs, (self.bound[0], self.bound[1]), pl0_bcs, n1_bcs
         )
         if pl1_filtered.shape[1] == 0:
-            return [np.empty((2,0))] * 5 # 返回5个空数组
+            return [np.empty((2, 0))] * 4 # Return 4 empty arrays
 
-        # 4. 在下表面折射
+        # 4. Refraction at the lower surface
         normal1 = self.down_surface_normal(pl1_filtered[0, :])
         n2_refracted = calculate_refraction_vector(self.n1, n1_filtered, self.n2, normal1)
         
-        # 5. 第二次筛选：基于是否发生全内反射 (TIR)
+        # 5. Second Filtering: Based on Total Internal Reflection (TIR)
         mask_no_tir1 = ~np.isnan(n2_refracted[0, :])
-        pl0_after_tir_filter = pl0_filtered[:, mask_no_tir1]
-        pl1_after_tir_filter = pl1_filtered[:, mask_no_tir1]
-        n2_after_tir_filter = n2_refracted[:, mask_no_tir1]
-        if pl1_after_tir_filter.shape[1] == 0:
-            return [np.empty((2,0))] * 5
+        pl0_valid = pl0_filtered[:, mask_no_tir1]
+        pl1_valid = pl1_filtered[:, mask_no_tir1]
+        n2_valid = n2_refracted[:, mask_no_tir1]
+        
+        # This is the set of all rays that have successfully entered the lens
+        if pl1_valid.shape[1] == 0:
+            return [np.empty((2, 0))] * 4
 
-        # 6. 与上表面求交
-        t2 = self._find_intersection_newton(pl1_after_tir_filter, n2_after_tir_filter, self.up_surface_fun, lambda x: self._poly_derivative(x, self.up_surface_params))
-        pl2_bcs = pl1_after_tir_filter + t2 * n2_after_tir_filter
+        # ====================================================================
+        # ## Core Modification Start ##
+        # ====================================================================
 
-        # 7. 第三次筛选：基于上表面边界
-        pl2_filtered, (pl1_final_candidates, n2_filtered, pl0_final_candidates,), mask2 = filter_rays_by_boundary(
-            pl2_bcs, (-self.bound_x/2, self.bound_x/2), pl1_after_tir_filter, n2_after_tir_filter, pl0_after_tir_filter
+        # 6. Calculate intersection with the upper surface for ALL valid rays
+        t2 = self._find_intersection_newton(pl1_valid, n2_valid, self.up_surface_fun, lambda x: self._poly_derivative(x, self.up_surface_params))
+        pl2_intersections = pl1_valid + t2 * n2_valid
+
+        # 7. "Classify" rays instead of filtering: find which rays hit the upper surface boundary
+        _, _, mask_hit_up_surface = filter_rays_by_boundary(
+            pl2_intersections, (self.bound[0], self.bound[1])
         )
-        if pl2_filtered.shape[1] == 0:
-            return [np.empty((2,0))] * 5
 
-        # 8. 在上表面折射/反射
-        normal2 = self.up_surface_normal(pl2_filtered[0, :])
-        n3_final_candidates = calculate_reflection_vector(n2_filtered,normal2)
-        
-        # 9. 第四次筛选：基于第二次TIR
-        mask_final = ~np.isnan(n3_final_candidates[0, :])
-        
-        # 应用最终筛选到所有数组，确保它们一一对应
-        p0_final = pl0_final_candidates[:, mask_final]
-        p1_final = pl1_final_candidates[:, mask_final]
-        p2_final = pl2_filtered[:, mask_final]
-        n3_final = n3_final_candidates[:, mask_final]
-        
-        # 10. 转换回世界坐标并返回
-        p0_wcs = self.OptEl_coordinate_to_world_coordinate(p0_final)
-        p1_wcs = self.OptEl_coordinate_to_world_coordinate(p1_final)
-        p2_wcs = self.OptEl_coordinate_to_world_coordinate(p2_final)
-        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_final, is_vector=True)
+        # Prepare final arrays to hold results for both "hit" and "miss" cases
+        p2_final_bcs = np.zeros_like(pl1_valid)
+        n3_final_bcs = np.zeros_like(n2_valid)
+
+        # 8. Process rays that successfully hit the second surface
+        if np.any(mask_hit_up_surface):
+            # Select the rays that hit
+            pl2_hit = pl2_intersections[:, mask_hit_up_surface]
+            n2_hit = n2_valid[:, mask_hit_up_surface]
+            
+            # Perform reflection on the upper surface
+            normal2 = self.up_surface_normal(pl2_hit[0, :])
+            n3_hit = calculate_reflection_vector(n2_hit, normal2)
+            
+            # Place results into their corresponding positions in the final arrays
+            p2_final_bcs[:, mask_hit_up_surface] = pl2_hit
+            n3_final_bcs[:, mask_hit_up_surface] = n3_hit
+
+        # 9. Process rays that missed the second surface
+        mask_miss_up_surface = ~mask_hit_up_surface
+        if np.any(mask_miss_up_surface):
+            # Select the rays that missed
+            pl1_miss = pl1_valid[:, mask_miss_up_surface]
+            n2_miss = n2_valid[:, mask_miss_up_surface]
+            
+            # Apply the new rule: p2 = p1 + 100 * n2, n3 = n2
+            p2_for_missed = pl1_miss + 100 * n2_miss
+            n3_for_missed = n2_miss
+            
+            # Place results into their corresponding positions in the final arrays
+            p2_final_bcs[:, mask_miss_up_surface] = p2_for_missed
+            n3_final_bcs[:, mask_miss_up_surface] = n3_for_missed
+            
+        # ====================================================================
+        # ## Core Modification End ##
+        # ====================================================================
+
+        # 10. Convert all aligned arrays back to world coordinates and return
+        # At this point, p0_valid, p1_valid, p2_final_bcs, and n3_final_bcs are all
+        # correctly sized and aligned.
+        p0_wcs = self.OptEl_coordinate_to_world_coordinate(pl0_valid)
+        p1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_valid)
+        p2_wcs = self.OptEl_coordinate_to_world_coordinate(p2_final_bcs)
+        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_final_bcs, is_vector=True)
         
         return p0_wcs, p1_wcs, p2_wcs, n3_wcs
 
     def plot_element_2d(self, ax, **kwargs):
         """在2D坐标轴上绘制透镜轮廓。"""
-        x_local = np.linspace(-self.bound_x/2, self.bound_x/2, 200)
+        x_local = np.linspace(self.bound[0], self.bound[1], 200)
         up_y_local = self.up_surface_fun(x_local)
         down_y_local = self.down_surface_fun(x_local)
         
@@ -290,79 +327,137 @@ class LC_device(OptElement):
 
 
 class Point_light_source(OptElement):
-    """2D点光源，在扇形区域内均匀发射光线。"""
-    def __init__(self, num_rays=1000, emission_angle_deg=45, **kwargs):
+    """
+    2D点光源，其辐射方向根据给定的强度曲线进行加权。
+    """
+    def __init__(self, num_rays=1000, radiation_profile=None, **kwargs):
+        """
+        初始化点光源。
+        
+        :param num_rays: 生成的光线数量。
+        :param radiation_profile: 光源的辐射特性曲线，一个 Nx2 的数组，
+                                  格式为 [[角度1, 强度1], [角度2, 强度2], ...]。
+                                  角度从主轴（0度）开始计算。
+                                  如果为 None，则使用用户指定的默认分布。
+        :param kwargs: 传递给 OptElement 基类的参数（例如位姿矩阵）。
+        """
         super().__init__(**kwargs)
         self.num_rays = num_rays
-        self.emission_angle_rad = np.deg2rad(emission_angle_deg)
         
+        if radiation_profile is None:
+            # --- 核心修改部分 ---
+            # 如果未提供特性曲线，则默认使用您指定的新点对
+            self.radiation_profile = np.array([
+                [0, 1.0], [10, 0.98], [20, 0.96], [30, 0.90], [40, 0.82],
+                [50, 0.70], [60, 0.55], [70, 0.37], [80, 0.12], [90, 0.00]
+            ])
+            # --- 修改结束 ---
+        else:
+            self.radiation_profile = np.array(radiation_profile)
+            
+        # 预计算累积分布函数 (CDF) 以便快速采样
+        self._prepare_cdf()
+
+    def _prepare_cdf(self):
+        """
+        根据辐射曲线计算累积分布函数 (CDF)，用于逆变换采样。
+        【已修改】根据数据点数量动态选择插值方法，避免错误。
+        """
+        angles_deg_orig = self.radiation_profile[:, 0]
+        intensities_orig = self.radiation_profile[:, 1]
+
+        # 使用插值来创建更平滑、更密集的曲线
+        angles_deg_interp = np.linspace(angles_deg_orig.min(), angles_deg_orig.max(), 1000)
+        
+        num_points = len(angles_deg_orig)
+        
+        if num_points >= 4:
+            interp_kind = 'cubic'
+        elif num_points == 3:
+            interp_kind = 'quadratic'
+        else: 
+            interp_kind = 'linear'
+        
+        if num_points > 1:
+            f_intensities = interp1d(angles_deg_orig, intensities_orig, kind=interp_kind, bounds_error=False, fill_value=0)
+            intensities_interp = f_intensities(angles_deg_interp)
+        else:
+            intensities_interp = np.full_like(angles_deg_interp, intensities_orig[0])
+
+        intensities_interp[intensities_interp < 0] = 0
+        self.angles_rad_interp = np.deg2rad(angles_deg_interp)
+
+        cdf_unnormalized = np.cumsum(intensities_interp)
+        
+        if cdf_unnormalized[-1] > 0:
+            self.cdf_normalized = cdf_unnormalized / cdf_unnormalized[-1]
+        else: 
+            self.cdf_normalized = np.linspace(0, 1, len(angles_deg_interp))
+
+
     def trace_ray(self):
+        """
+        使用逆变换采样生成光线，使其方向符合辐射特性曲线。
+        """
         p_local = np.zeros((2, self.num_rays))
+        np.random.seed(0)  # 确保结果可复现
+        uniform_samples = np.random.rand(self.num_rays)
+        sampled_angles = np.interp(uniform_samples, self.cdf_normalized, self.angles_rad_interp)
+        signs = np.random.choice([-1, 1], self.num_rays)
+        final_angles = sampled_angles * signs
         
-        # 在 [-angle/2, +angle/2] 范围内均匀生成角度
-        angles = np.random.uniform(-self.emission_angle_rad / 2, self.emission_angle_rad / 2, self.num_rays)
+        n_local = np.vstack((np.sin(final_angles), np.cos(final_angles)))
         
-        # 角度转为方向向量 (本地坐标系，主方向为+y)
-        n_local = np.vstack((np.sin(angles), np.cos(angles)))
-        
-        # 转换到世界坐标系
         p_wcs = self.OptEl_coordinate_to_world_coordinate(p_local)
         n_wcs = self.OptEl_coordinate_to_world_coordinate(n_local, is_vector=True)
         return p_wcs, n_wcs
 
     def plot_element_2d(self, ax, **kwargs):
-        """在2D坐标轴上绘制光源位置。"""
+        """在2D坐标轴上绘制光源位置和方向箭头。"""
+        # 1. 获取光源在世界坐标系中的位置和旋转矩阵
         pos = self.OptEl_to_world_translation_matrix
-        ax.plot(pos[0], pos[1], marker='*', markersize=12, color='yellow', label='光源', **kwargs)
+        # rot_matrix = self.OptEl_to_world_rotation_matrix # 旋转矩阵在 OptEl_coordinate_to_world_coordinate 内部使用
 
-# =============================================================================
-# 4. 示例与可视化
-# =============================================================================
-if __name__ == '__main__':
-    # --- 1. 初始化光学系统 ---
-    
-    # 定义光源：10000条光线，发射角为60度
-    light_source = Point_light_source(num_rays=10000, emission_angle_deg=60)
-    
-    # 定义透镜：上下表面由4个参数的多项式定义 y = c0 + c1*x + c2*x^2 + c3*x^3
-    # 初始形状为一个简单的平凸透镜
-    up_params = [39, -1, 0, 0]  # 平面 y = 1.5
-    down_params = [0, 0,0, 0] # 曲面 y = -0.05*x^2
-    lens = LC_device(
-        up_surface_params=up_params,
-        down_surface_params=down_params,
-        bound_x=20.0,
-        OptEl_to_world_translation_matrix=np.array([[0], [5]])
-    )
-    
-    # --- 2. 执行光线追迹 ---
-    print("正在执行光线追迹...")
-    initial_p_all, initial_n_all = light_source.trace_ray()
-    
-    # 修改这里的解包，以接收新的返回值
-    # p0_final 是与 p1_final, p2_final 一一对应的初始点
-    p0_final, p1_final, p2_final, n_final = lens.trace_ray(initial_p_all, initial_n_all)
-    print(f"共 {initial_p_all.shape[1]} 条初始光线，成功追迹 {p0_final.shape[1]} 条光线。")
+        # 2. 绘制光源位置的标记 (您的原始功能，保持不变)
+        marker_color = kwargs.pop('color', 'yellow')
+        marker_label = kwargs.pop('label', '光源')
+        
+        # 从 (2,1) 或 (1,2) 的位置矩阵中提取标量 x, y
+        start_x = pos.flatten()[0]
+        start_y = pos.flatten()[1]
 
-    # --- 3. 可视化结果 ---
-    print("正在生成可视化图像...")
-    fig, ax = plt.subplots(figsize=(10, 10))
-    # ... (其他绘图设置不变) ...
+        ax.plot(start_x, start_y, marker='*', markersize=15, color=marker_color, label=marker_label, **kwargs)
 
-    # 绘制光源和透镜
-    light_source.plot_element_2d(ax)
-    lens.plot_element_2d(ax, color='cyan', label='透镜')
+        # 3. 计算并绘制方向箭头
+        
+        # 定义一个在光源本地坐标系下的“朝上”向量 (0, 1)
+        # 这是光源自身的“前进”方向
+        local_direction_vector = np.array([[0], [1]])
 
-    # 绘制光线路径
-    # 现在 p0_final 和 p1_final 的长度是匹配的！
-    plot_2d_rays(ax, p0_final, p1_final, num_to_plot=100, colors='orange', linewidths=0.3, alpha=0.5, label='入射光线')
-    
-    # p1_final 和 p2_final 的长度也是匹配的！
-    plot_2d_rays(ax, p1_final, p2_final, num_to_plot=100, colors='deepskyblue', linewidths=0.3, alpha=0.7, label='内部光线')
-    
-    p_final_extended = p2_final + n_final * 20
-    plot_2d_rays(ax, p2_final, p_final_extended, num_to_plot=100, colors='lime', linewidths=0.5, alpha=0.8, label='出射光线')
+        # 使用您的转换函数，将这个本地向量转换为世界坐标系中的方向向量
+        # is_vector=True 确保只应用旋转，不应用平移
+        world_direction_vector = self.OptEl_coordinate_to_world_coordinate(
+            local_direction_vector, is_vector=True
+        ).flatten()
 
-    ax.legend()
-    ax.grid(True, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-    plt.show()
+        # 为了可视化，给箭头一个固定的长度
+        arrow_length = 15.0  # 您可以根据坐标轴的范围调整这个值
+
+        # 计算箭头在世界坐标系中的 x 和 y 方向分量 (dx, dy)
+        dx = arrow_length * world_direction_vector[0]
+        dy = arrow_length * world_direction_vector[1]
+
+        # 直接使用计算出的 start_x, start_y 和 dx, dy 来绘制箭头
+        ax.arrow(
+            start_x,
+            start_y,
+            dx,
+            dy,
+            head_width=3,      # 箭头头部的宽度
+            head_length=4,     # 箭头头部的长度
+            fc='red',          # 箭头的填充颜色
+            ec='red',          # 箭头的边框颜色
+            label='方向',
+            length_includes_head=True # 使箭头总长接近 arrow_length
+        )
+
