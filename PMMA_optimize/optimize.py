@@ -96,10 +96,22 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     return light_sources_config_2d
 
 class Objective:
-    def __init__(self, lc_class, light_source_class, loss_evaluator, device_config, light_params, constraints_config):
-        self.lc_class, self.light_source_class, self.loss_evaluator = lc_class, light_source_class, loss_evaluator
-        self.num_up = len(device_config['up_surface_params']); self.num_down = len(device_config['down_surface_params'])
-        self.device_static_cfg = {'bound': device_config['bound'], 'OptEl_to_world_translation_matrix': device_config['OptEl_to_world_translation_matrix']}
+    def __init__(self, device_class, light_source_class, loss_evaluator, device_static_config, constraints_config):
+        """
+        构造函数更新：存储静态配置，包括基准线。
+        """
+        self.lc_class = device_class
+        self.light_source_class = light_source_class
+        self.loss_evaluator = loss_evaluator
+        
+        # 存储静态信息，这些信息在优化过程中不变
+        self.device_static_cfg = device_static_config
+        
+        # 参数数量由控制点数量决定
+        self.num_up = self.device_static_cfg['num_up_control_points']
+        self.num_down = self.device_static_cfg['num_down_control_points']
+
+        # 其他初始化
         cfg = constraints_config
         self.x_samples = np.linspace(cfg['x_range'][0], cfg['x_range'][1], cfg.get('sample_resolution', 50))
         self.penalty_weight = cfg.get('penalty_weight', 1000.0)
@@ -114,147 +126,199 @@ class Objective:
         return p1 + p2+p3
 
     def __call__(self, params):
-        up_params, down_params, light_params = params[:self.num_up], params[self.num_up:self.num_up+self.num_down], params[self.num_up+self.num_down:]
+        """
+        __call__ 方法重大更新：
+        1. 将接收到的 'params' 解释为 'offsets' (偏移量)。
+        2. 结合基准线计算最终的 'y_coords'。
+        3. 使用正确的参数名 ('up_y_coords') 来创建 SplineDevice。
+        """
+        # 1. 将优化器传入的 params 向量正确地切片为偏移量和光源参数
+        up_offsets = params[:self.num_up]
+        down_offsets = params[self.num_up : self.num_up + self.num_down]
+        light_params = params[self.num_up + self.num_down:]
+
         light_configs = calculate_light_sources_from_params(*light_params)
         if not light_configs: return 1e9
         
-        device_cfg = {'up_surface_params':up_params, 'down_surface_params':down_params, **self.device_static_cfg}
+        # 2. 从存储的静态配置中获取基准线
+        base_up_y = self.device_static_cfg['base_up_y_line']
+        base_down_y = self.device_static_cfg['base_down_y_line']
+        
+        # 3. 计算最终的Y坐标
+        final_up_y = base_up_y - up_offsets
+        final_down_y = base_down_y + down_offsets
+
+        # 4. 使用 SplineDevice 类期望的正确参数名来构建配置字典
+        device_cfg = {
+            'up_y_coords': final_up_y,
+            'down_y_coords': final_down_y,
+            'bound': self.device_static_cfg['bound'],
+            'num_control_points_up': self.num_up,
+            'num_control_points_down': self.num_down
+        }
         device = self.lc_class(**device_cfg)
         
+        # --- 后续的光线追迹和损失评估逻辑保持不变 ---
         sources = [self.light_source_class(**cfg) for cfg in light_configs]
         all_p, all_n = zip(*[s.trace_ray() for s in sources])
         p_initial, n_initial = np.hstack(all_p), np.hstack(all_n)
         
-        _,_, p1, n2 = device.trace_ray(p_initial, n_initial) # 简化追迹用于评估
+        _,_, p1, n2 = device.trace_ray(p_initial, n_initial)
         self.last_loss,_,_ = self.loss_evaluator.evaluate(p1, n2, quiet=True)
         self.last_penalty = self._calculate_thickness_penalty(device)
-        return self.last_loss + self.last_penalty
-
-
-if __name__ == '__main__':
-    # --- 1. 定义优化问题的各项配置 ---
-    device_config = {
-        'up_surface_params': [39,-1,0,0,0,0,0,0,0,0,0,0], # y = 1.5
-        'down_surface_params': [0, 0,0,0,0,0,0,0,0,0,0,0], # y = -1.5 - 0.01x^2
-        'bound': [0,15.2],
-        'OptEl_to_world_translation_matrix': np.array([0, 0]).reshape(2, 1)
-    }
-    initial_light_params = [-0.1, -0.6, 0.0, 0.6] # a, l1, l2, l3
-    evaluator = PlanarLossEvaluator(line_normal=[1,0], line_center=[0,29], line_length=20, weights=[0.4,0.3,0.3])
-    constraints_cfg = {'x_range': [0, 15.2], 'penalty_weight': 1000.0}
-    
-    initial_params_vec = np.concatenate([device_config['up_surface_params'], device_config['down_surface_params'], initial_light_params])
-    
-    bounds = [(39,39.54), (-2,-1), (-0.05,0.05), (-0.05,0.05), (-0.0005,0.0005), (-0.0005,0.0005), (-0.0005,0.0005), (-0.0005,0.0005), (-0.0005,0.0005), (-0.0005,0.0005), (-0.0005,0.0005), (-0.0005,0.0005)] + \
-             [(0,2), (0,0.1), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005), (0,0.0005)] + \
-             [(-0.2, 0), (-1, -0.33), (-0.33, 0.33), (0.33, 1)]
-
-    # --- 2. 优化前可视化 ---
-    print("--- 优化前状态可视化 ---")
-    fig_before, ax_before = plt.subplots(figsize=(10, 10))
-    initial_device = LC_device(**device_config)
-    initial_sources = [Point_light_source(**cfg) for cfg in calculate_light_sources_from_params(*initial_light_params)]
-    # --- 2. Trace and Combine Rays ---
-    all_initial_points = []
-    all_initial_normals = []
-
-    # Iterate through each source in the list
-    for source in initial_sources:
-        # Trace rays for a single source
-        points, normals = source.trace_ray()
         
-        # Append the results to the lists
-        all_initial_points.append(points)
-        all_initial_normals.append(normals)
+        return self.last_loss + self.last_penalty
+    
+def setup_and_visualize(ax, title, device_params, light_params, evaluator_obj):
+    """
+    一个辅助函数，用于根据给定的参数设置场景并进行可视化。
+    """
+    # 1. 根据参数构建器件和光源
+    device = LC_device(**device_params)
+    sources = [Point_light_source(**cfg) for cfg in calculate_light_sources_from_params(*light_params)]
 
-    all_initial_points = np.hstack(all_initial_points)
-    all_initial_normals = np.hstack(all_initial_normals)
-    # 追迹光线通过透镜，得到所有路径点和方向向量
-    p0, p1, p2, n3 = initial_device.trace_ray(all_initial_points, all_initial_normals)
-
-    # 重新组织光线数据，以匹配 visualize_scene 函数的输入
+    # 2. 追迹光线
+    all_points, all_normals = [], []
+    for source in sources:
+        points, normals = source.trace_ray()
+        all_points.append(points)
+        all_normals.append(normals)
+    
+    p0, p1, p2, n3 = device.trace_ray(np.hstack(all_points), np.hstack(all_normals))
     rays = (p0, p1, p2, n3)
+    
+    # 3. 计算命中点
+    _, _, hit_points = evaluator_obj.evaluate(p2, n3, quiet=True)
 
-    # --- 3. 计算命中点 ---
-    # 使用评估器计算光线与平面的交点
-    _, _, hit_points = evaluator.evaluate(p2, n3, quiet=True)
-
-    # --- 4. 调用 visualize_scene 函数进行可视化 ---
+    # 4. 调用主可视化函数
     visualize_scene(
-        ax_before,
-        title="完整光学场景可视化",
-        source_list=initial_sources,
-        device=initial_device,
-        evaluator=evaluator,
+        ax,
+        title=title,
+        source_list=sources,
+        device=device,
+        evaluator=evaluator_obj,
         rays=rays,
         hit_points=hit_points
     )
+if __name__ == '__main__':
+    
+    # --- 1. 定义优化问题的初始配置和边界 ---
+    print("Step 1: 正在设置优化问题的初始参数和边界...")
+    
+    # 定义样条控制点的数量和器件的物理边界
+    NUM_UP_CONTROL_POINTS = 12
+    NUM_DOWN_CONTROL_POINTS = 12
+    DEVICE_X_BOUNDS = [0, 15.2]
 
+    # 上表面的初始参数 (基于 y = 39.54 - x)
+    control_x_up = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
+    base_up_y = 39.54 - control_x_up
+    initial_up_offsets = np.zeros(NUM_UP_CONTROL_POINTS)
+
+    # 下表面的初始参数 (基于 y = 0)
+    initial_down_offsets = np.zeros(NUM_DOWN_CONTROL_POINTS)
+
+    # 光源的初始参数
+    initial_light_params = [-0.1, -0.6, 0.0, 0.6]
+    
+    # 组合成完整的初始参数向量
+    initial_params_vec = np.concatenate([initial_up_offsets, initial_down_offsets, initial_light_params])
+
+    # 定义优化参数的边界 (现在是为偏移量定义边界)
+    up_offset_bounds = [(0, 15)] * NUM_UP_CONTROL_POINTS
+    down_offset_bounds = [(0,1)] * NUM_DOWN_CONTROL_POINTS
+    light_bounds = [(-0.2, 0), (-1, -0.33), (-0.33, 0.33), (0.33, 1)]
+    bounds = up_offset_bounds + down_offset_bounds + light_bounds
+
+    # --- 2. 实例化目标函数和评估器 ---
+    evaluator_config = {
+        'line_normal': [1, 0], 'line_center': [0, 29], 'line_length': 20.0,
+        'weights': [0.7, 0.1, 0.2]
+    }
+    evaluator = PlanarLossEvaluator(**evaluator_config)
+    
+    constraints_cfg = {'x_range': DEVICE_X_BOUNDS, 'penalty_weight': 1000.0}
+    
+    # 这个config用于向Objective类传递不参与优化的静态信息
+    device_static_config = {
+        'num_up_control_points': NUM_UP_CONTROL_POINTS,
+        'num_down_control_points': NUM_DOWN_CONTROL_POINTS,
+        'bound': DEVICE_X_BOUNDS,
+        'base_up_y_line': base_up_y, # 将基准线传入
+        'base_down_y_line': np.zeros(NUM_DOWN_CONTROL_POINTS), # 将基准线传入
+        'OptEl_to_world_translation_matrix': np.array([[0], [0]]), # 2D平面中无z轴偏移
+        'OptEl_to_world_rotation_matrix': np.eye(2) # 2D平面中无旋转
+    }
+
+    # 实例化目标函数 (注意: 假设您的Objective类已更新以处理偏移量)
+    objective_func = Objective(LC_device, Point_light_source, evaluator, device_static_config,constraints_cfg)
+
+    # --- 3. 优化前可视化 ---
+    print("Step 2: 正在生成优化前的场景可视化...")
+    fig_before, ax_before = plt.subplots(figsize=(12, 12))
+    
+    # 准备可视化所需的参数字典
+    initial_device_params = {
+        'up_y_coords': base_up_y - initial_up_offsets,
+        'down_y_coords': np.zeros(NUM_DOWN_CONTROL_POINTS) + initial_down_offsets,
+        'bound': DEVICE_X_BOUNDS,
+        'num_control_points_up': NUM_UP_CONTROL_POINTS,
+        'num_control_points_down': NUM_DOWN_CONTROL_POINTS
+    }
+    setup_and_visualize(ax_before, "优化前初始场景", initial_device_params, initial_light_params, evaluator)
     plt.show()
 
-    # --- 3. 运行差分进化优化 ---
-    objective_func = Objective(LC_device, Point_light_source, evaluator, device_config, initial_light_params, constraints_cfg)
-    # --- b. 设置优化器超参数 ---
-    max_generations = 10
+    # --- 4. 运行差分进化优化 ---
+    print("\nStep 3: 开始运行差分进化优化...")
+    max_generations = 100
     
-    # --- c. 创建并配置进度条的回调函数 ---
     pbar = tqdm(total=max_generations, desc="Optimizing")
     def callback(xk,convergence):
         # xk 是当前最佳解的参数，convergence是收敛情况
         pbar.update(1)
         pbar.set_postfix({'convergence': f'{convergence}'})
 
-    # --- d. 调用 SciPy 的差分进化函数 ---
     result = differential_evolution(
-        func=objective_func,          # 目标函数
-        bounds=bounds,                # 参数边界
-        maxiter=max_generations,      # 最大迭代次数 (代数)
-        popsize=15,                   # 种群大小乘数 (总种群 = popsize * dims)
-        mutation=0.8,                 # 变异因子 F
-        recombination=0.9,            # 交叉概率 CR
-        strategy='best1bin',          # 差分策略 (与您代码中的经典策略一致)
-        disp=False,                   # 不在控制台打印收敛信息
-        callback=callback,            # 每一次迭代后调用的函数
-        workers=-1                    # 使用所有可用的CPU核心进行并行计算
+        func=objective_func,
+        bounds=bounds,
+        maxiter=max_generations,
+        popsize=15,
+        mutation=(0.5, 1.0), # 使用元组以启用抖动(dithering)
+        recombination=0.7,
+        strategy='best1bin',
+        disp=False,
+        callback=callback,
+        workers=-1  # 并行计算
     )
+    
+    # --- 5. 优化后结果打印与可视化 ---
+    final_up_offsets = result.x[:NUM_UP_CONTROL_POINTS]
+    final_down_offsets = result.x[NUM_UP_CONTROL_POINTS : NUM_UP_CONTROL_POINTS + NUM_DOWN_CONTROL_POINTS]
+    final_light_params = result.x[NUM_UP_CONTROL_POINTS + NUM_DOWN_CONTROL_POINTS:]
 
+    print("\n==============================================")
+    print("          优化完成 (Optimization Complete)")
+    print("==============================================")
+    print(f"\n[+] 最佳损失值 (Lowest Loss): {result.fun:.6f}")
+    print("\n[+] 最佳参数 (Optimized Parameters):")
+    print(f"  - 上表面偏移量: {np.round(final_up_offsets, 4)}")
+    print(f"  - 下表面偏移量: {np.round(final_down_offsets, 4)}")
+    print(f"  - 光源参数: {np.round(final_light_params, 4)}")
+    print("\n" + "="*46)
+
+    print("\nStep 4: 正在生成优化后的场景可视化...")
+    fig_after, ax_after = plt.subplots(figsize=(12, 12))
     
-    # --- 4. 优化后可视化 ---
-    print("\n\n优化完成!")
-    print("="*30)
-    print(f"最佳损失值 (Best Fitness): {result.fun:.6f}")
-    print(f"最佳解 (Best Solution):")
-    print(result.x)
-    print("\n--- 优化后状态可视化 ---")
-    num_up = len(device_config['up_surface_params']); num_down = len(device_config['down_surface_params'])
-    final_device_cfg = device_config.copy()
-    final_device_cfg['up_surface_params'] = result.x[:num_up]
-    final_device_cfg['down_surface_params'] = result.x[num_up:num_up+num_down]
-    final_light_params = result.x[num_up+num_down:]
-    
-    
-    final_device = LC_device(**final_device_cfg)
-    final_sources = [Point_light_source(**cfg) for cfg in calculate_light_sources_from_params(*final_light_params)]
-    # --- 2. Trace and Combine Rays ---
-    all_final_points = []
-    all_final_normals = []
-    for source in final_sources:
-        points, normals = source.trace_ray()
-        all_final_points.append(points)
-        all_final_normals.append(normals)
-    
-    all_final_points = np.hstack(all_final_points)
-    all_final_normals = np.hstack(all_final_normals)
-    p0, p1, p2, n3 = final_device.trace_ray(all_final_points, all_final_normals)
-    rays = (p0, p1, p2, n3)
-    fig_after, ax_after = plt.subplots(figsize=(10, 10))
-    visualize_scene(
-        ax_after,
-        title="优化后的完整光学场景可视化",
-        source_list=final_sources,
-        device=final_device,
-        evaluator=evaluator,
-        rays=rays,
-        hit_points=hit_points
+    final_device_params = {
+        'up_y_coords': base_up_y - final_up_offsets,
+        'down_y_coords': np.zeros(NUM_DOWN_CONTROL_POINTS) + final_down_offsets,
+        'bound': DEVICE_X_BOUNDS,
+        'num_control_points_up': NUM_UP_CONTROL_POINTS,
+        'num_control_points_down': NUM_DOWN_CONTROL_POINTS
+    }
+    plot_title = (
+        f"优化后光学场景\n"
+        f"最终损失值: {result.fun:.4f}"
     )
+    setup_and_visualize(ax_after, plot_title, final_device_params, final_light_params, evaluator)
     plt.show()

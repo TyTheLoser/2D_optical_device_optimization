@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
 from scipy.spatial.transform import Rotation as R
+from scipy.interpolate import CubicSpline
 
 
 # =============================================================================
@@ -156,38 +157,43 @@ class LC_device(OptElement):
     """
     2D自由曲面透镜类，使用牛顿法进行快速光线-曲线求交。
     """
-    def __init__(self, up_surface_params, down_surface_params, bound=[0,15.2], **kwargs):
+    def __init__(self, up_y_coords, down_y_coords, bound, num_control_points_up, num_control_points_down, **kwargs):
+        """
+        使用三次样条插值来定义和计算光学器件表面。
+        """
         super().__init__(**kwargs)
         self.n1, self.n2, self.n3 = 1.0, 1.49, 1.0
-        self.up_surface_params = np.array(up_surface_params)
-        self.down_surface_params = np.array(down_surface_params)
         self.bound = bound
-    
-    def _poly_calc(self, x, params):
-        """计算多项式 y = c0 + c1*x + c2*x^2 + ..."""
-        x_powers = np.vander(x, len(params), increasing=True)
-        return x_powers @ params
+        
+        # 1. 分别为上下表面定义控制点的 x 坐标
+        # 确保 control_x_up 的长度与 up_y_coords 匹配
+        self.control_x_up = np.linspace(bound[0], bound[1], num_control_points_up)
+        
+        # 确保 control_x_down 的长度与 down_y_coords 匹配
+        self.control_x_down = np.linspace(bound[0], bound[1], num_control_points_down)
 
-    def _poly_derivative(self, x, params):
-        """计算多项式导数 dy/dx。"""
-        if len(params) < 2:
-            return np.zeros_like(x)
-        der_params = np.array([i * p for i, p in enumerate(params) if i > 0])
-        x_powers = np.vander(x, len(der_params), increasing=True)
-        return x_powers @ der_params
-    
-    def up_surface_fun(self, x): return self._poly_calc(x, self.up_surface_params)
-    def down_surface_fun(self, x): return self._poly_calc(x, self.down_surface_params)
-    
+        # 2. 使用匹配的 x, y 坐标创建三次样条插值器
+        self.up_spline = CubicSpline(self.control_x_up, up_y_coords)
+        self.down_spline = CubicSpline(self.control_x_down, down_y_coords)
+
+    def up_surface_fun(self, x):
+        """使用样条插值器计算上表面 y 坐标。"""
+        return self.up_spline(x)
+
+    def down_surface_fun(self, x):
+        """使用样条插值器计算下表面 y 坐标。"""
+        return self.down_spline(x)
+
     def up_surface_normal(self, x):
         """计算上表面法线（指向+y方向）。"""
-        dy_dx = self._poly_derivative(x, self.up_surface_params)
+        # CubicSpline 对象可以直接计算导数 (nu=1)
+        dy_dx = self.up_spline(x, nu=1)
         normal = np.vstack((-dy_dx, np.ones_like(x)))
         return normal / np.linalg.norm(normal, axis=0)
 
     def down_surface_normal(self, x):
         """计算下表面法线（指向+y方向）。"""
-        dy_dx = self._poly_derivative(x, self.down_surface_params)
+        dy_dx = self.down_spline(x, nu=1)
         normal = np.vstack((-dy_dx, np.ones_like(x)))
         return normal / np.linalg.norm(normal, axis=0)
 
@@ -226,7 +232,7 @@ class LC_device(OptElement):
         n1_bcs = self.world_coordinate_to_OptEl_coordinate(n_wcs, is_vector=True)
         
         # 2. Intersection with the lower surface
-        t1 = self._find_intersection_newton(pl0_bcs, n1_bcs, self.down_surface_fun, lambda x: self._poly_derivative(x, self.down_surface_params))
+        t1 = self._find_intersection_newton(pl0_bcs, n1_bcs, self.down_surface_fun, lambda x: self.up_spline(x, nu=1))
         pl1_bcs = pl0_bcs + t1 * n1_bcs
         
         # 3. First Filtering: Based on boundary of the lower surface
@@ -255,7 +261,7 @@ class LC_device(OptElement):
         # ====================================================================
 
         # 6. Calculate intersection with the upper surface for ALL valid rays
-        t2 = self._find_intersection_newton(pl1_valid, n2_valid, self.up_surface_fun, lambda x: self._poly_derivative(x, self.up_surface_params))
+        t2 = self._find_intersection_newton(pl1_valid, n2_valid, self.up_surface_fun, lambda x: self.up_spline(x, nu=1))
         pl2_intersections = pl1_valid + t2 * n2_valid
 
         # 7. "Classify" rays instead of filtering: find which rays hit the upper surface boundary
