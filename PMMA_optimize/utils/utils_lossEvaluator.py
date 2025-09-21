@@ -131,7 +131,7 @@ class PlanarLossEvaluator:
         # 计算线段的两个端点
         p1 = self.center - (self.length / 2.0) * self.u_axis.reshape(2, 1)
         p2 = self.center + (self.length / 2.0) * self.u_axis.reshape(2, 1)
-        ax.plot([p1[0,0], p2[0,0]], [p1[1,0], p2[1,0]], color=color,  label='评估平面 (Target)', **kwargs)
+        ax.plot([p1[0,0], p2[0,0]], [p1[1,0], p2[1,0]], color=color,  label='Target', **kwargs)
 
     def save_to_image(self, filename, intersection_points, image_size=(512, 64), 
                       colormap=plt.cm.hot):

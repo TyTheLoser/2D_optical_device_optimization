@@ -426,7 +426,7 @@ class Point_light_source(OptElement):
 
         # 2. 绘制光源位置的标记 (您的原始功能，保持不变)
         marker_color = kwargs.pop('color', 'yellow')
-        marker_label = kwargs.pop('label', '光源')
+        marker_label = kwargs.pop('label', 'source')
         
         # 从 (2,1) 或 (1,2) 的位置矩阵中提取标量 x, y
         start_x = pos.flatten()[0]
@@ -463,7 +463,7 @@ class Point_light_source(OptElement):
             head_length=4,     # 箭头头部的长度
             fc='red',          # 箭头的填充颜色
             ec='red',          # 箭头的边框颜色
-            label='方向',
+            label='vector',
             length_includes_head=True # 使箭头总长接近 arrow_length
         )
 

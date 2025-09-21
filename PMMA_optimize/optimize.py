@@ -256,26 +256,26 @@ if __name__ == '__main__':
     print("Step 1: 正在设置优化问题的配置...")
 
     # --- a. 文件与几何配置 ---
-    NUM_UP_CONTROL_POINTS = 5  # <-- 您可以修改这里的数量来进行维度扩展
-    NUM_DOWN_CONTROL_POINTS = 5
+    NUM_UP_CONTROL_POINTS = 50  # <-- 您可以修改这里的数量来进行维度扩展
+    NUM_DOWN_CONTROL_POINTS = 50
     DEVICE_X_BOUNDS = [0, 15.2]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3_1.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_1.npz'
     
     # ... 其他配置保持不变 ...
     initial_light_params_defaults = [-0.1, 0, 0.5, 0.5]
     evaluator_config = {
         'line_normal': [1, 0], 'line_center': [0, 29], 'line_length': 20.0,
-        'weights': [0.9, 0.1, 0.1]
+        'weights': [0.8, 0.1, 0.1]
     }
     constraints_cfg = {'x_range': DEVICE_X_BOUNDS, 'penalty_weight': 1000.0}
     
     # --- c. 定义 *所有* 参数的完整边界 ---
-    up_offset_bounds = [(0, 5)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
-    down_offset_bounds = [(0, 5)] * NUM_DOWN_CONTROL_POINTS
-    light_bounds = [(-0.2, 0), (-1, 1), (0, 1),  (0, 1)]
+    up_offset_bounds = [(0, 1)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
+    down_offset_bounds = [(0, 1)] * NUM_DOWN_CONTROL_POINTS
+    light_bounds = [(-0.2, 0), (-0.33, 0.33), (0, 1),  (0, 1)]
     full_bounds = up_offset_bounds + down_offset_bounds + light_bounds
 
     # --- d. 参数冻结配置 ---
@@ -285,7 +285,7 @@ if __name__ == '__main__':
     active_params_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
     
     # --- e. 优化器超参数 ---
-    max_generations = 100
+    max_generations = 1000
     popsize_multiplier = 20
     
     # =========================================================================
@@ -392,9 +392,14 @@ if __name__ == '__main__':
     print(f"\nStep 5: 开始运行差分进化优化... (优化 {len(active_bounds)} 个活动参数)")
     
     pbar = tqdm(total=max_generations, desc="Optimizing")
-    def callback(xk, convergence):
+    def callback(intermediate_result):
+        """
+        接收一个包含当前优化状态的 OptimizeResult 对象。
+        intermediate_result.fun 就是当前找到的最佳损失值。
+        """
         pbar.update(1)
-        pbar.set_postfix({'convergence': f'{convergence:.6f}'})
+        # 直接从 intermediate_result 对象获取损失值并显示
+        pbar.set_postfix({'最佳损失': f'{intermediate_result.fun:.4f}'})
 
     result = differential_evolution(
         func=wrapped_objective_func,
