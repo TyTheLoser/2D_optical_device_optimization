@@ -410,13 +410,13 @@ def visualize_scene(ax, title, source_list, device, evaluator, rays, hit_points)
     for source in source_list:
         source.plot_element_2d(ax, zorder=10)
 
-    device.plot_element_2d(ax, color='cyan', label='透镜 (Lens)', zorder=5)
+    device.plot_element_2d(ax, color='cyan', label='Lens', zorder=5)
     evaluator.plot_element_2d(ax, color='magenta', linestyle='--', linewidth=3, zorder=10)
 
     
 
     if hit_points.shape[1] > 0:
-        ax.scatter(hit_points[0, :], hit_points[1, :], s=5, c='red', alpha=0.8, label='命中点 (Hits)', zorder=11)
+        ax.scatter(hit_points[0, :], hit_points[1, :], s=5, c='red', alpha=0.8, label='HitPoints', zorder=11)
 
     ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)")
     ax.legend(); ax.set_aspect('equal', adjustable='box')
