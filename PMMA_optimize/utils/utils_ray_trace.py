@@ -145,81 +145,43 @@ def generate_device_stl_from_npz(npz_path, stl_path, x_range, y_range, resolutio
     return light_sources_world_pos
 def calculate_light_sources_from_params(a, l1, l2, l3):
     """
-    【2D版本】根据斜率a和三个相对位置参数l1,l2,l3，计算三个光源的位置和姿态。
+    【2D版本】根据一个固定的y坐标'a'和三个相对位置参数，计算三个光源的位置和姿态。
 
     参数定义已更新:
-    :param a: 直线的斜率 (y = a*x + c)
-    :param l1: 中间光源在整个线段 (p_start 到 p_end) 上的位置比例。范围[-1, 1]。
-              -1代表p_start, 0代表中心点, 1代表p_end。
-    :param l2: 左侧光源在"中间光源"与"左端点(p_start)"所构成线段上的位置比例。范围[0, 1]。
-              0代表与中间光源重合, 1代表与左端点重合。
-    :param l3: 右侧光源在"中间光源"与"右端点(p_end)"所构成线段上的位置比例。范围[0, 1]。
-              0代表与中间光源重合, 1代表与右端点重合。
+    :param a: 光源所在水平线的 y 坐标值。
+    :param l1: 中间光源在水平线段上的位置比例。范围[-1, 1]。
+              -1代表左端点, 0代表中心点, 1代表右端点。
+    :param l2: 左侧光源的位置比例。插值区间为 [距离中间光源1.8mm的左锚点] 到 [线段左端点]。范围[0, 1]。
+    :param l3: 右侧光源的位置比例。插值区间为 [距离中间光源1.8mm的右锚点] 到 [线段右端点]。范围[0, 1]。
     :return: light_sources_config_2d 列表
     """
-    # --- a. 计算直线与矩形的交点 (此部分逻辑不变) ---
-    rect_bounds = {'x_min': 2.8, 'x_max': 11.66, 'y_min': -5.5, 'y_max': -1.0}
-    intersections = []
-    # 直线方程: y = a*x - 7.23*a - 3.25
-    x_at_ymin = rect_bounds['x_min']
-    y_at_ymin = a * x_at_ymin - 7.23 * a - 3.25
-    if rect_bounds['y_min'] <= y_at_ymin <= rect_bounds['y_max']:
-        intersections.append(np.array([x_at_ymin, y_at_ymin]))
-
-    x_at_ymax = rect_bounds['x_max']
-    y_at_ymax = a * x_at_ymax - 7.23 * a - 3.25
-    if rect_bounds['y_min'] <= y_at_ymax <= rect_bounds['y_max']:
-        intersections.append(np.array([x_at_ymax, y_at_ymax]))
-
-    if a != 0:
-        y_at_ymin_bound = rect_bounds['y_min']
-        x_at_ymin_bound = (y_at_ymin_bound + 7.23 * a + 3.25) / a
-        if rect_bounds['x_min'] <= x_at_ymin_bound <= rect_bounds['x_max']:
-            intersections.append(np.array([x_at_ymin_bound, y_at_ymin_bound]))
-
-        y_at_ymax_bound = rect_bounds['y_max']
-        x_at_ymax_bound = (y_at_ymax_bound + 7.23 * a + 3.25) / a
-        if rect_bounds['x_min'] <= x_at_ymax_bound <= rect_bounds['x_max']:
-            intersections.append(np.array([x_at_ymax_bound, y_at_ymax_bound]))
-
-    unique_intersections = np.unique(np.round(intersections, decimals=5), axis=0)
-    if len(unique_intersections) != 2:
-        return []
+    # --- a. 定义光源所在的水平线段 ---
+    # x 范围与之前的矩形边界保持一致
+    x_bounds = {'x_min': 2.8, 'x_max': 11.66}
     
-    p_start, p_end = unique_intersections
-    # 为清晰起见，确保 p_start 的 x 坐标更小
-    if p_start[0] > p_end[0]:
-        p_start, p_end = p_end, p_start
+    # 线段的左右端点，y坐标由参数'a'直接决定
+    p_start = np.array([x_bounds['x_min'], a])
+    p_end = np.array([x_bounds['x_max'], a])
     
-    # --- b. 计算线段中心和半长向量 (此部分逻辑不变) ---
+    # --- b. 计算线段中心和半长向量 ---
     segment_center = (p_start + p_end) / 2.0
     segment_half_vector = (p_end - p_start) / 2.0
 
     # ####################################################################
-    # ## c. 计算光源位置 (已按新逻辑重写) ##
+    # ## c. 计算光源位置 (基于新逻辑) ##
     # ####################################################################
     
     # 1. 根据 l1 计算中间光源的位置
     pos_middle = segment_center + l1 * segment_half_vector
     
-     # 计算朝向左端点(p_start)的单位向量
-    vec_to_start = p_start - pos_middle
-    norm_start = np.linalg.norm(vec_to_start)
-    # 如果中间光源与端点重合，则锚点也与端点重合，避免除零错误
-    if norm_start < 1e-9:
-        p_left_anchor = pos_middle
-    else:
-        unit_vec_to_start = vec_to_start / norm_start
-        p_left_anchor = pos_middle + 1.0 * unit_vec_to_start
+    # 2. 计算左右两个新的“锚点”，它们是插值的起点
+    # 因为是在水平线上，单位向量非常简单
+    
+    # 朝向左端点(p_start)的单位向量是 [-1, 0]
+    p_left_anchor = pos_middle + 1.8 * np.array([-1.0, 0.0])
 
-    # 计算朝向右端点(p_end)的单位向量
-    vec_to_end = p_end - pos_middle
-    norm_end = np.linalg.norm(vec_to_end)
-    if norm_end < 1e-9:
-        p_right_anchor = pos_middle
-    else:
-        unit_vec_to_end = vec_to_end / norm_end
-        p_right_anchor = pos_middle + 1.0 * unit_vec_to_end
+    # 朝向右端点(p_end)的单位向量是 [1, 0]
+    p_right_anchor = pos_middle + 1.8 * np.array([1.0, 0.0])
 
     # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
     pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
@@ -230,33 +192,18 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     # 5. 组合并塑形
     positions_2d = [pos_left, pos_middle, pos_right]
     positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
-    
-    # 4. 组合并塑形
-    positions_2d = [pos_left, pos_middle, pos_right]
-    positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
 
-    ####################################################################
-    # ## d. 计算光源姿态 (2D旋转矩阵) ##
-    ####################################################################
+    # ####################################################################
+    # ## d. 计算光源姿态 (旋转矩阵) ##
+    # ####################################################################
     
-    # 斜率为 a 的直线，其方向向量为 [1, a]
-    # 与其垂直的方向向量为 [-a, 1] (因为点积 1*(-a) + a*1 = 0)
-    # 我们将这个垂直向量作为光源的“朝向”（即本地坐标系的y'轴）
+    # 由于不再有斜率，我们假设光源始终指向上方 (+y方向)
+    # 这是一个标准的、无旋转的姿态（单位矩阵）
+    # 本地坐标系的 x'轴 -> 世界坐标系的 x轴 [1, 0]
+    # 本地坐标系的 y'轴 -> 世界坐标系的 y轴 [0, 1]
+    rotation_matrix_2d = np.eye(2)
     
-    # 归一化这个方向向量
-    norm = np.sqrt(a**2 + 1)
-    # 这是新的 y' 轴方向
-    new_y_axis = np.array([-a / norm, 1 / norm])
-    # 新的 x' 轴必须与 y' 轴垂直，可以通过旋转90度得到
-    new_x_axis = np.array([new_y_axis[1], -new_y_axis[0]]) # 即 [1/norm, a/norm]
-    
-    # 2D旋转矩阵的列就是新的基向量
-    rotation_matrix_2d = np.array([
-        [new_x_axis[0], new_y_axis[0]],
-        [new_x_axis[1], new_y_axis[1]]
-    ])
-    
-    ####################################################################
+    # ####################################################################
     
     # --- e. 构建2D光源配置列表 ---
     light_sources_config_2d = []
@@ -267,6 +214,7 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
         })
         
     return light_sources_config_2d
+
 def is_pure_rotation(matrix):
     """检查2x2矩阵是否为纯旋转矩阵（行列式为1）。"""
     return np.isclose(np.linalg.det(matrix), 1.0)
@@ -449,20 +397,23 @@ class LC_device(OptElement):
         normal = np.vstack((-dy_dx, np.ones_like(x)))
         return normal / np.linalg.norm(normal, axis=0)
 
-    def _find_intersection_newton(self, ray_origin, ray_dir, surface_func, derivative_func):
-        """使用牛顿法快速求解光线与曲线的交点参数 t。"""
+    def _find_intersection_newton(self, ray_origin, ray_dir, surface_spline):
+        """
+        使用牛顿法快速求解光线与样条曲线的交点参数 t。
+        直接接收一个 CubicSpline 对象。
+        """
         t = np.ones(ray_origin.shape[1]) * 5.0 # 初始猜测
         for _ in range(10): # 牛顿法迭代
             x_intersect = ray_origin[0, :] + t * ray_dir[0, :]
             y_ray = ray_origin[1, :] + t * ray_dir[1, :]
-            y_surface = surface_func(x_intersect)
+            
+            # 直接从样条对象获取 y 和 dy/dx
+            y_surface = surface_spline(x_intersect)
+            dy_dx = surface_spline(x_intersect, nu=1)
             
             f_t = y_ray - y_surface
-            
-            dy_dx = derivative_func(x_intersect)
             f_prime_t = ray_dir[1, :] - dy_dx * ray_dir[0, :]
             
-            # 防止除零
             f_prime_t[np.abs(f_prime_t) < 1e-9] = 1e-9
             
             delta_t = -f_t / f_prime_t
@@ -484,7 +435,7 @@ class LC_device(OptElement):
         n1_bcs = self.world_coordinate_to_OptEl_coordinate(n_wcs, is_vector=True)
         
         # 2. Intersection with the lower surface
-        t1 = self._find_intersection_newton(pl0_bcs, n1_bcs, self.down_surface_fun, lambda x: self.up_spline(x, nu=1))
+        t1 = self._find_intersection_newton(pl0_bcs, n1_bcs, self.down_spline)
         pl1_bcs = pl0_bcs + t1 * n1_bcs
         
         # 3. First Filtering: Based on boundary of the lower surface
@@ -513,7 +464,7 @@ class LC_device(OptElement):
         # ====================================================================
 
         # 6. Calculate intersection with the upper surface for ALL valid rays
-        t2 = self._find_intersection_newton(pl1_valid, n2_valid, self.up_surface_fun, lambda x: self.up_spline(x, nu=1))
+        t2 = self._find_intersection_newton(pl1_valid, n2_valid, self.up_spline)
         pl2_intersections = pl1_valid + t2 * n2_valid
 
         # 7. "Classify" rays instead of filtering: find which rays hit the upper surface boundary
