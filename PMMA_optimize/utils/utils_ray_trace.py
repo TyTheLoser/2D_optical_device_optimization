@@ -9,12 +9,264 @@ from matplotlib import pyplot as plt
 from matplotlib.collections import LineCollection
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import CubicSpline
+from stl import mesh
 
 
 # =============================================================================
 # 1. 2D旋转与坐标变换辅助函数
 # =============================================================================
+def generate_device_stl_from_npz(npz_path, stl_path, x_range, y_range, resolution=50):
+    """
+    从.npz文件中读取上下表面参数，生成一个三维实体STL文件，并计算光源的世界坐标。
 
+    :param npz_path: 输入的 .npz 文件路径。
+    :param stl_path: 输出的 .stl 文件路径。
+    :param x_range: 器件的X轴范围，格式为 (x_min, x_max)。
+    :param y_range: 器件的Y轴范围 (宽度)，格式为 (y_min, y_max)。
+    :param resolution: 曲面网格的精细度，数字越大，模型越精细。
+    :return: light_sources_world_pos (list): 三个光源在3D世界坐标系中的位置列表。
+    """
+    print(f"--- 开始处理文件: {npz_path} ---")
+
+    # --- 1. 加载数据 ---
+    try:
+        data = np.load(npz_path)
+        up_y_coords = data['up_y_coords']
+        down_y_coords = data['down_y_coords']
+        num_up = data['num_up']
+        num_down = data['num_down']
+        light_params = data['light_params']
+        print("✅ NPZ 文件加载成功。")
+    except FileNotFoundError:
+        print(f"❌ 错误: 文件 '{npz_path}' 未找到。")
+        return None
+    except KeyError as e:
+        print(f"❌ 错误: NPZ 文件中缺少必要的键: {e}")
+        return None
+
+    # --- 2. 重建样条曲线 ---
+    control_x_up = np.linspace(x_range[0], x_range[1], num_up)
+    control_x_down = np.linspace(x_range[0], x_range[1], num_down)
+
+    up_spline = CubicSpline(control_x_up, up_y_coords)
+    down_spline = CubicSpline(control_x_down, down_y_coords)
+    print("✅ 样条曲线重建完成。")
+
+    # --- 3. 生成三维网格顶点 ---
+    x_samples = np.linspace(x_range[0], x_range[1], resolution)
+    y_samples = np.linspace(y_range[0], y_range[1], resolution)
+    y_center = (y_range[0] + y_range[1]) / 2.0
+    X, Y = np.meshgrid(x_samples, y_samples)
+
+    # 计算上、下表面的 Z 坐标
+    Z_up = up_spline(X)
+    Z_down = down_spline(X)
+
+    # 将所有顶点组合成一个列表
+    # 顺序: 上表面顶点 -> 下表面顶点
+    verts_up = np.stack([X.flatten(), Y.flatten(), Z_up.flatten()], axis=1)
+    verts_down = np.stack([X.flatten(), Y.flatten(), Z_down.flatten()], axis=1)
+    all_vertices = np.vstack([verts_up, verts_down])
+    print("✅ 三维顶点生成完成。")
+
+    # --- 4. 生成三角面片 ---
+    faces = []
+    res = resolution
+    offset = res * res # 下表面顶点的起始索引
+
+    for j in range(res - 1):
+        for i in range(res - 1):
+            # 当前网格单元的四个顶点索引
+            p1 = j * res + i
+            p2 = j * res + i + 1
+            p3 = (j + 1) * res + i
+            p4 = (j + 1) * res + i + 1
+            
+            # 上表面 (法线朝外, +z)
+            faces.append([p1, p2, p4])
+            faces.append([p1, p4, p3])
+            
+            # 下表面 (法线朝外, -z), 顶点顺序相反
+            faces.append([offset + p1, offset + p4, offset + p2])
+            faces.append([offset + p1, offset + p3, offset + p4])
+
+    # 封闭四个侧面
+    for i in range(res - 1):
+        # 前侧面 (y = y_min)
+        p1_up, p2_up = i, i + 1
+        p1_down, p2_down = offset + i, offset + i + 1
+        faces.append([p1_up, p2_down, p1_down])
+        faces.append([p1_up, p2_up, p2_down])
+
+        # 后侧面 (y = y_max)
+        p1_up, p2_up = (res-1)*res + i, (res-1)*res + i + 1
+        p1_down, p2_down = offset + (res-1)*res + i, offset + (res-1)*res + i + 1
+        faces.append([p1_up, p1_down, p2_down])
+        faces.append([p1_up, p2_down, p2_up])
+        
+        # 左侧面 (x = x_min)
+        p1_up, p2_up = i*res, (i+1)*res
+        p1_down, p2_down = offset + i*res, offset + (i+1)*res
+        faces.append([p1_up, p1_down, p2_down])
+        faces.append([p1_up, p2_down, p2_up])
+
+        # 右侧面 (x = x_max)
+        p1_up, p2_up = i*res + res-1, (i+1)*res + res-1
+        p1_down, p2_down = offset + i*res + res-1, offset + (i+1)*res + res-1
+        faces.append([p1_up, p2_down, p1_down])
+        faces.append([p1_up, p2_up, p2_down])
+        
+    print("✅ 三角面片生成完成。")
+    
+    # --- 5. 创建并保存STL文件 ---
+    device_mesh = mesh.Mesh(np.zeros(len(faces), dtype=mesh.Mesh.dtype))
+    for i, f in enumerate(faces):
+        device_mesh.vectors[i] = all_vertices[f]
+        
+    device_mesh.save(stl_path)
+    print(f"💾 STL 文件已保存至: '{stl_path}'")
+    
+    # --- 6. 计算光源的三维世界坐标 ---
+    
+    # 计算光源相对于器件原点的局部2D坐标
+    light_configs_local = calculate_light_sources_from_params(*light_params)
+    
+    light_sources_world_pos = []
+    for cfg in light_configs_local:
+        local_pos_2d = cfg['OptEl_to_world_translation_matrix'].flatten()
+        
+        # 转换为3D坐标 (假设器件和光源都在 z=0 平面) 
+        # 注意: STL模型中的Z轴对应我们2D坐标系中的Y轴
+        world_pos_3d = [local_pos_2d[0], y_center, local_pos_2d[1]]
+        light_sources_world_pos.append(world_pos_3d)
+
+    print("✅ 光源三维坐标计算完成。")
+    
+    return light_sources_world_pos
+def calculate_light_sources_from_params(a, l1, l2, l3):
+    """
+    【2D版本】根据斜率a和三个相对位置参数l1,l2,l3，计算三个光源的位置和姿态。
+
+    参数定义已更新:
+    :param a: 直线的斜率 (y = a*x + c)
+    :param l1: 中间光源在整个线段 (p_start 到 p_end) 上的位置比例。范围[-1, 1]。
+              -1代表p_start, 0代表中心点, 1代表p_end。
+    :param l2: 左侧光源在"中间光源"与"左端点(p_start)"所构成线段上的位置比例。范围[0, 1]。
+              0代表与中间光源重合, 1代表与左端点重合。
+    :param l3: 右侧光源在"中间光源"与"右端点(p_end)"所构成线段上的位置比例。范围[0, 1]。
+              0代表与中间光源重合, 1代表与右端点重合。
+    :return: light_sources_config_2d 列表
+    """
+    # --- a. 计算直线与矩形的交点 (此部分逻辑不变) ---
+    rect_bounds = {'x_min': 2.8, 'x_max': 11.66, 'y_min': -5.5, 'y_max': -1.0}
+    intersections = []
+    # 直线方程: y = a*x - 7.23*a - 3.25
+    x_at_ymin = rect_bounds['x_min']
+    y_at_ymin = a * x_at_ymin - 7.23 * a - 3.25
+    if rect_bounds['y_min'] <= y_at_ymin <= rect_bounds['y_max']:
+        intersections.append(np.array([x_at_ymin, y_at_ymin]))
+
+    x_at_ymax = rect_bounds['x_max']
+    y_at_ymax = a * x_at_ymax - 7.23 * a - 3.25
+    if rect_bounds['y_min'] <= y_at_ymax <= rect_bounds['y_max']:
+        intersections.append(np.array([x_at_ymax, y_at_ymax]))
+
+    if a != 0:
+        y_at_ymin_bound = rect_bounds['y_min']
+        x_at_ymin_bound = (y_at_ymin_bound + 7.23 * a + 3.25) / a
+        if rect_bounds['x_min'] <= x_at_ymin_bound <= rect_bounds['x_max']:
+            intersections.append(np.array([x_at_ymin_bound, y_at_ymin_bound]))
+
+        y_at_ymax_bound = rect_bounds['y_max']
+        x_at_ymax_bound = (y_at_ymax_bound + 7.23 * a + 3.25) / a
+        if rect_bounds['x_min'] <= x_at_ymax_bound <= rect_bounds['x_max']:
+            intersections.append(np.array([x_at_ymax_bound, y_at_ymax_bound]))
+
+    unique_intersections = np.unique(np.round(intersections, decimals=5), axis=0)
+    if len(unique_intersections) != 2:
+        return []
+    
+    p_start, p_end = unique_intersections
+    # 为清晰起见，确保 p_start 的 x 坐标更小
+    if p_start[0] > p_end[0]:
+        p_start, p_end = p_end, p_start
+    
+    # --- b. 计算线段中心和半长向量 (此部分逻辑不变) ---
+    segment_center = (p_start + p_end) / 2.0
+    segment_half_vector = (p_end - p_start) / 2.0
+
+    # ####################################################################
+    # ## c. 计算光源位置 (已按新逻辑重写) ##
+    # ####################################################################
+    
+    # 1. 根据 l1 计算中间光源的位置
+    pos_middle = segment_center + l1 * segment_half_vector
+    
+     # 计算朝向左端点(p_start)的单位向量
+    vec_to_start = p_start - pos_middle
+    norm_start = np.linalg.norm(vec_to_start)
+    # 如果中间光源与端点重合，则锚点也与端点重合，避免除零错误
+    if norm_start < 1e-9:
+        p_left_anchor = pos_middle
+    else:
+        unit_vec_to_start = vec_to_start / norm_start
+        p_left_anchor = pos_middle + 1.0 * unit_vec_to_start
+
+    # 计算朝向右端点(p_end)的单位向量
+    vec_to_end = p_end - pos_middle
+    norm_end = np.linalg.norm(vec_to_end)
+    if norm_end < 1e-9:
+        p_right_anchor = pos_middle
+    else:
+        unit_vec_to_end = vec_to_end / norm_end
+        p_right_anchor = pos_middle + 1.0 * unit_vec_to_end
+
+    # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
+    pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
+    
+    # 4. 根据 l3，在新的“右锚点”和“右端点(p_end)”之间进行线性插值
+    pos_right = p_right_anchor + l3 * (p_end - p_right_anchor)
+    
+    # 5. 组合并塑形
+    positions_2d = [pos_left, pos_middle, pos_right]
+    positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
+    
+    # 4. 组合并塑形
+    positions_2d = [pos_left, pos_middle, pos_right]
+    positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
+
+    ####################################################################
+    # ## d. 计算光源姿态 (2D旋转矩阵) ##
+    ####################################################################
+    
+    # 斜率为 a 的直线，其方向向量为 [1, a]
+    # 与其垂直的方向向量为 [-a, 1] (因为点积 1*(-a) + a*1 = 0)
+    # 我们将这个垂直向量作为光源的“朝向”（即本地坐标系的y'轴）
+    
+    # 归一化这个方向向量
+    norm = np.sqrt(a**2 + 1)
+    # 这是新的 y' 轴方向
+    new_y_axis = np.array([-a / norm, 1 / norm])
+    # 新的 x' 轴必须与 y' 轴垂直，可以通过旋转90度得到
+    new_x_axis = np.array([new_y_axis[1], -new_y_axis[0]]) # 即 [1/norm, a/norm]
+    
+    # 2D旋转矩阵的列就是新的基向量
+    rotation_matrix_2d = np.array([
+        [new_x_axis[0], new_y_axis[0]],
+        [new_x_axis[1], new_y_axis[1]]
+    ])
+    
+    ####################################################################
+    
+    # --- e. 构建2D光源配置列表 ---
+    light_sources_config_2d = []
+    for pos in positions_2d_col:
+        light_sources_config_2d.append({
+            'OptEl_to_world_translation_matrix': pos,
+            "OptEl_to_world_rotation_matrix": rotation_matrix_2d
+        })
+        
+    return light_sources_config_2d
 def is_pure_rotation(matrix):
     """检查2x2矩阵是否为纯旋转矩阵（行列式为1）。"""
     return np.isclose(np.linalg.det(matrix), 1.0)
@@ -162,7 +414,7 @@ class LC_device(OptElement):
         使用三次样条插值来定义和计算光学器件表面。
         """
         super().__init__(**kwargs)
-        self.n1, self.n2, self.n3 = 1.0, 1.49, 1.0
+        self.n1, self.n2, self.n3 = 1.0, 1.51, 1.0
         self.bound = bound
         
         # 1. 分别为上下表面定义控制点的 x 坐标

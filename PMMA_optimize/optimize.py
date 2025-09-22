@@ -5,7 +5,7 @@ from matplotlib.collections import LineCollection
 import time
 import os
 from scipy.interpolate import CubicSpline
-from utils.utils_ray_trace import LC_device, Point_light_source
+from utils.utils_ray_trace import LC_device, Point_light_source,calculate_light_sources_from_params
 from utils.utils_lossEvaluator import PlanarLossEvaluator, calculate_ray_line_intersections
 from utils.utils_free_form_prism_design import visualize_scene
 from scipy.optimize import differential_evolution
@@ -15,130 +15,7 @@ from scipy.optimize import differential_evolution
 # =============================================================================
 # 3. 动态光源生成与优化目标封装 (2D版本)
 # =============================================================================
-def calculate_light_sources_from_params(a, l1, l2, l3):
-    """
-    【2D版本】根据斜率a和三个相对位置参数l1,l2,l3，计算三个光源的位置和姿态。
 
-    参数定义已更新:
-    :param a: 直线的斜率 (y = a*x + c)
-    :param l1: 中间光源在整个线段 (p_start 到 p_end) 上的位置比例。范围[-1, 1]。
-              -1代表p_start, 0代表中心点, 1代表p_end。
-    :param l2: 左侧光源在"中间光源"与"左端点(p_start)"所构成线段上的位置比例。范围[0, 1]。
-              0代表与中间光源重合, 1代表与左端点重合。
-    :param l3: 右侧光源在"中间光源"与"右端点(p_end)"所构成线段上的位置比例。范围[0, 1]。
-              0代表与中间光源重合, 1代表与右端点重合。
-    :return: light_sources_config_2d 列表
-    """
-    # --- a. 计算直线与矩形的交点 (此部分逻辑不变) ---
-    rect_bounds = {'x_min': 2.8, 'x_max': 11.66, 'y_min': -5.5, 'y_max': -1.0}
-    intersections = []
-    # 直线方程: y = a*x - 7.23*a - 3.25
-    x_at_ymin = rect_bounds['x_min']
-    y_at_ymin = a * x_at_ymin - 7.23 * a - 3.25
-    if rect_bounds['y_min'] <= y_at_ymin <= rect_bounds['y_max']:
-        intersections.append(np.array([x_at_ymin, y_at_ymin]))
-
-    x_at_ymax = rect_bounds['x_max']
-    y_at_ymax = a * x_at_ymax - 7.23 * a - 3.25
-    if rect_bounds['y_min'] <= y_at_ymax <= rect_bounds['y_max']:
-        intersections.append(np.array([x_at_ymax, y_at_ymax]))
-
-    if a != 0:
-        y_at_ymin_bound = rect_bounds['y_min']
-        x_at_ymin_bound = (y_at_ymin_bound + 7.23 * a + 3.25) / a
-        if rect_bounds['x_min'] <= x_at_ymin_bound <= rect_bounds['x_max']:
-            intersections.append(np.array([x_at_ymin_bound, y_at_ymin_bound]))
-
-        y_at_ymax_bound = rect_bounds['y_max']
-        x_at_ymax_bound = (y_at_ymax_bound + 7.23 * a + 3.25) / a
-        if rect_bounds['x_min'] <= x_at_ymax_bound <= rect_bounds['x_max']:
-            intersections.append(np.array([x_at_ymax_bound, y_at_ymax_bound]))
-
-    unique_intersections = np.unique(np.round(intersections, decimals=5), axis=0)
-    if len(unique_intersections) != 2:
-        return []
-    
-    p_start, p_end = unique_intersections
-    # 为清晰起见，确保 p_start 的 x 坐标更小
-    if p_start[0] > p_end[0]:
-        p_start, p_end = p_end, p_start
-    
-    # --- b. 计算线段中心和半长向量 (此部分逻辑不变) ---
-    segment_center = (p_start + p_end) / 2.0
-    segment_half_vector = (p_end - p_start) / 2.0
-
-    # ####################################################################
-    # ## c. 计算光源位置 (已按新逻辑重写) ##
-    # ####################################################################
-    
-    # 1. 根据 l1 计算中间光源的位置
-    pos_middle = segment_center + l1 * segment_half_vector
-    
-     # 计算朝向左端点(p_start)的单位向量
-    vec_to_start = p_start - pos_middle
-    norm_start = np.linalg.norm(vec_to_start)
-    # 如果中间光源与端点重合，则锚点也与端点重合，避免除零错误
-    if norm_start < 1e-9:
-        p_left_anchor = pos_middle
-    else:
-        unit_vec_to_start = vec_to_start / norm_start
-        p_left_anchor = pos_middle + 1.0 * unit_vec_to_start
-
-    # 计算朝向右端点(p_end)的单位向量
-    vec_to_end = p_end - pos_middle
-    norm_end = np.linalg.norm(vec_to_end)
-    if norm_end < 1e-9:
-        p_right_anchor = pos_middle
-    else:
-        unit_vec_to_end = vec_to_end / norm_end
-        p_right_anchor = pos_middle + 1.0 * unit_vec_to_end
-
-    # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
-    pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
-    
-    # 4. 根据 l3，在新的“右锚点”和“右端点(p_end)”之间进行线性插值
-    pos_right = p_right_anchor + l3 * (p_end - p_right_anchor)
-    
-    # 5. 组合并塑形
-    positions_2d = [pos_left, pos_middle, pos_right]
-    positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
-    
-    # 4. 组合并塑形
-    positions_2d = [pos_left, pos_middle, pos_right]
-    positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
-
-    ####################################################################
-    # ## d. 计算光源姿态 (2D旋转矩阵) ##
-    ####################################################################
-    
-    # 斜率为 a 的直线，其方向向量为 [1, a]
-    # 与其垂直的方向向量为 [-a, 1] (因为点积 1*(-a) + a*1 = 0)
-    # 我们将这个垂直向量作为光源的“朝向”（即本地坐标系的y'轴）
-    
-    # 归一化这个方向向量
-    norm = np.sqrt(a**2 + 1)
-    # 这是新的 y' 轴方向
-    new_y_axis = np.array([-a / norm, 1 / norm])
-    # 新的 x' 轴必须与 y' 轴垂直，可以通过旋转90度得到
-    new_x_axis = np.array([new_y_axis[1], -new_y_axis[0]]) # 即 [1/norm, a/norm]
-    
-    # 2D旋转矩阵的列就是新的基向量
-    rotation_matrix_2d = np.array([
-        [new_x_axis[0], new_y_axis[0]],
-        [new_x_axis[1], new_y_axis[1]]
-    ])
-    
-    ####################################################################
-    
-    # --- e. 构建2D光源配置列表 ---
-    light_sources_config_2d = []
-    for pos in positions_2d_col:
-        light_sources_config_2d.append({
-            'OptEl_to_world_translation_matrix': pos,
-            "OptEl_to_world_rotation_matrix": rotation_matrix_2d
-        })
-        
-    return light_sources_config_2d
 
 class Objective:
     def __init__(self, device_class, light_source_class, loss_evaluator, device_static_config, constraints_config):
@@ -256,16 +133,16 @@ if __name__ == '__main__':
     print("Step 1: 正在设置优化问题的配置...")
 
     # --- a. 文件与几何配置 ---
-    NUM_UP_CONTROL_POINTS = 50  # <-- 您可以修改这里的数量来进行维度扩展
-    NUM_DOWN_CONTROL_POINTS = 50
+    NUM_UP_CONTROL_POINTS = 3  # <-- 您可以修改这里的数量来进行维度扩展
+    NUM_DOWN_CONTROL_POINTS = 3
     DEVICE_X_BOUNDS = [0, 15.2]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3_1.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_1.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3_4.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_4.npz'
     
     # ... 其他配置保持不变 ...
-    initial_light_params_defaults = [-0.1, 0, 0.5, 0.5]
+    initial_light_params_defaults = [0, 0, 0.5, 0.5]
     evaluator_config = {
         'line_normal': [1, 0], 'line_center': [0, 29], 'line_length': 20.0,
         'weights': [0.8, 0.1, 0.1]
@@ -273,15 +150,15 @@ if __name__ == '__main__':
     constraints_cfg = {'x_range': DEVICE_X_BOUNDS, 'penalty_weight': 1000.0}
     
     # --- c. 定义 *所有* 参数的完整边界 ---
-    up_offset_bounds = [(0, 1)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
-    down_offset_bounds = [(0, 1)] * NUM_DOWN_CONTROL_POINTS
-    light_bounds = [(-0.2, 0), (-0.33, 0.33), (0, 1),  (0, 1)]
+    up_offset_bounds = [(0, 15)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
+    down_offset_bounds = [(0, 15)] * NUM_DOWN_CONTROL_POINTS
+    light_bounds = [(0, 0), (-0.33, 0.33), (0, 1),  (0, 1)]
     full_bounds = up_offset_bounds + down_offset_bounds + light_bounds
 
     # --- d. 参数冻结配置 ---
     up_active_mask = [True] * NUM_UP_CONTROL_POINTS
     down_active_mask = [True] * NUM_DOWN_CONTROL_POINTS
-    light_active_mask = [True, True, True, True]
+    light_active_mask = [False, True, True, True]
     active_params_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
     
     # --- e. 优化器超参数 ---
