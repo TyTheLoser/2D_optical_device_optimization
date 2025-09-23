@@ -157,7 +157,7 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     """
     # --- a. 定义光源所在的水平线段 ---
     # x 范围与之前的矩形边界保持一致
-    x_bounds = {'x_min': 2.8, 'x_max': 11.66}
+    x_bounds = {'x_min': 0, 'x_max': 8.3}
     
     # 线段的左右端点，y坐标由参数'a'直接决定
     p_start = np.array([x_bounds['x_min'], a])
@@ -426,9 +426,8 @@ class LC_device(OptElement):
         """
         Traces rays through a 2D lens and returns the points at each stage.
         
-        Modified Logic: This version retains all rays that successfully intersect the first
-        surface. If a ray fails to intersect the second surface, its final state is
-        calculated by extending it a fixed distance forward.
+        Modified Logic: This version ONLY retains rays that successfully intersect and
+        refract through BOTH the lower and upper surfaces.
         """
         # 1. Coordinate Transformation
         pl0_bcs = self.world_coordinate_to_OptEl_coordinate(p_wcs)
@@ -436,14 +435,21 @@ class LC_device(OptElement):
         
         # 2. Intersection with the lower surface
         t1 = self._find_intersection_newton(pl0_bcs, n1_bcs, self.down_spline)
+        # Filter out invalid intersections immediately
+        t1[t1 < 1e-5] = np.nan 
+        valid_t1_mask = ~np.isnan(t1)
+        if not np.any(valid_t1_mask):
+            return [np.empty((2, 0))] * 4
+            
+        pl0_bcs, n1_bcs, t1 = pl0_bcs[:, valid_t1_mask], n1_bcs[:, valid_t1_mask], t1[valid_t1_mask]
         pl1_bcs = pl0_bcs + t1 * n1_bcs
         
         # 3. First Filtering: Based on boundary of the lower surface
-        pl1_filtered, (pl0_filtered, n1_filtered,), mask1 = filter_rays_by_boundary(
+        pl1_filtered, (pl0_filtered, n1_filtered), _ = filter_rays_by_boundary(
             pl1_bcs, (self.bound[0], self.bound[1]), pl0_bcs, n1_bcs
         )
         if pl1_filtered.shape[1] == 0:
-            return [np.empty((2, 0))] * 4 # Return 4 empty arrays
+            return [np.empty((2, 0))] * 4
 
         # 4. Refraction at the lower surface
         normal1 = self.down_surface_normal(pl1_filtered[0, :])
@@ -451,71 +457,47 @@ class LC_device(OptElement):
         
         # 5. Second Filtering: Based on Total Internal Reflection (TIR)
         mask_no_tir1 = ~np.isnan(n2_refracted[0, :])
-        pl0_valid = pl0_filtered[:, mask_no_tir1]
-        pl1_valid = pl1_filtered[:, mask_no_tir1]
-        n2_valid = n2_refracted[:, mask_no_tir1]
+        pl0_after_tir = pl0_filtered[:, mask_no_tir1]
+        pl1_after_tir = pl1_filtered[:, mask_no_tir1]
+        n2_after_tir = n2_refracted[:, mask_no_tir1]
         
-        # This is the set of all rays that have successfully entered the lens
-        if pl1_valid.shape[1] == 0:
+        if pl1_after_tir.shape[1] == 0:
             return [np.empty((2, 0))] * 4
 
         # ====================================================================
-        # ## Core Modification Start ##
+        # ## 核心修改逻辑 ##
         # ====================================================================
 
-        # 6. Calculate intersection with the upper surface for ALL valid rays
-        t2 = self._find_intersection_newton(pl1_valid, n2_valid, self.up_spline)
-        pl2_intersections = pl1_valid + t2 * n2_valid
+        # 6. Calculate intersection with the upper surface
+        t2 = self._find_intersection_newton(pl1_after_tir, n2_after_tir, self.up_spline)
+        t2[t2 < 1e-5] = np.nan # Filter out invalid intersections immediately
+        pl2_intersections = pl1_after_tir + t2 * n2_after_tir
 
-        # 7. "Classify" rays instead of filtering: find which rays hit the upper surface boundary
-        _, _, mask_hit_up_surface = filter_rays_by_boundary(
-            pl2_intersections, (self.bound[0], self.bound[1])
+        # 7. Final Filtering: Filter rays based on upper surface boundary
+        #    This single step replaces the previous "classify and process separately" logic.
+        pl2_final, (pl0_final, pl1_final, n2_final), mask_hit_up = filter_rays_by_boundary(
+            pl2_intersections, (self.bound[0], self.bound[1]),
+            pl0_after_tir, pl1_after_tir, n2_after_tir
         )
 
-        # Prepare final arrays to hold results for both "hit" and "miss" cases
-        p2_final_bcs = np.zeros_like(pl1_valid)
-        n3_final_bcs = np.zeros_like(n2_valid)
+        # If no rays hit the upper surface, return empty arrays
+        if pl2_final.shape[1] == 0:
+            return [np.empty((2, 0))] * 4
 
-        # 8. Process rays that successfully hit the second surface
-        if np.any(mask_hit_up_surface):
-            # Select the rays that hit
-            pl2_hit = pl2_intersections[:, mask_hit_up_surface]
-            n2_hit = n2_valid[:, mask_hit_up_surface]
-            
-            # Perform reflection on the upper surface
-            normal2 = self.up_surface_normal(pl2_hit[0, :])
-            n3_hit = calculate_reflection_vector(n2_hit, normal2)
-            
-            # Place results into their corresponding positions in the final arrays
-            p2_final_bcs[:, mask_hit_up_surface] = pl2_hit
-            n3_final_bcs[:, mask_hit_up_surface] = n3_hit
+        # 8. Refraction at the upper surface for the successfully hit rays
+        normal2 = self.up_surface_normal(pl2_final[0, :])
+        n3_final = calculate_refraction_vector(self.n2, n2_final, self.n3, normal2)
+        
+        # Additional filter for TIR on the second surface
+        mask_no_tir2 = ~np.isnan(n3_final[0, :])
+        if not np.any(mask_no_tir2):
+            return [np.empty((2,0))] * 4
 
-        # 9. Process rays that missed the second surface
-        mask_miss_up_surface = ~mask_hit_up_surface
-        if np.any(mask_miss_up_surface):
-            # Select the rays that missed
-            pl1_miss = pl1_valid[:, mask_miss_up_surface]
-            n2_miss = n2_valid[:, mask_miss_up_surface]
-            
-            # Apply the new rule: p2 = p1 + 100 * n2, n3 = n2
-            p2_for_missed = pl1_miss + 100 * n2_miss
-            n3_for_missed = n2_miss
-            
-            # Place results into their corresponding positions in the final arrays
-            p2_final_bcs[:, mask_miss_up_surface] = p2_for_missed
-            n3_final_bcs[:, mask_miss_up_surface] = n3_for_missed
-            
-        # ====================================================================
-        # ## Core Modification End ##
-        # ====================================================================
-
-        # 10. Convert all aligned arrays back to world coordinates and return
-        # At this point, p0_valid, p1_valid, p2_final_bcs, and n3_final_bcs are all
-        # correctly sized and aligned.
-        p0_wcs = self.OptEl_coordinate_to_world_coordinate(pl0_valid)
-        p1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_valid)
-        p2_wcs = self.OptEl_coordinate_to_world_coordinate(p2_final_bcs)
-        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_final_bcs, is_vector=True)
+        # Apply the final TIR filter to all ray path points and vectors
+        p0_wcs = self.OptEl_coordinate_to_world_coordinate(pl0_final[:, mask_no_tir2])
+        p1_wcs = self.OptEl_coordinate_to_world_coordinate(pl1_final[:, mask_no_tir2])
+        p2_wcs = self.OptEl_coordinate_to_world_coordinate(pl2_final[:, mask_no_tir2])
+        n3_wcs = self.OptEl_coordinate_to_world_coordinate(n3_final[:, mask_no_tir2], is_vector=True)
         
         return p0_wcs, p1_wcs, p2_wcs, n3_wcs
 

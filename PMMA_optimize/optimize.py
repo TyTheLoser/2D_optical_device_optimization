@@ -133,36 +133,36 @@ if __name__ == '__main__':
     print("Step 1: 正在设置优化问题的配置...")
 
     # --- a. 文件与几何配置 ---
-    NUM_UP_CONTROL_POINTS = 3  # <-- 您可以修改这里的数量来进行维度扩展
-    NUM_DOWN_CONTROL_POINTS = 3
-    DEVICE_X_BOUNDS = [0, 15]
+    NUM_UP_CONTROL_POINTS = 18  # <-- 您可以修改这里的数量来进行维度扩展
+    NUM_DOWN_CONTROL_POINTS = 18
+    DEVICE_X_BOUNDS = [0, 8.3]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3_9.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_9.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/0923/optimization_result_9_5.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0923/optimization_result_{NUM_UP_CONTROL_POINTS}_5.npz'
     
     # ... 其他配置保持不变 ...
-    initial_light_params_defaults = [-1, 0, 0.5, 0.5]
+    initial_light_params_defaults = [-1.52565719, 0, 0.5, 0.5]
     evaluator_config = {
-        'line_normal': [1, 0], 'line_center': [0, 29], 'line_length': 20.0,
+        'line_normal': [0, 1], 'line_center': [8.3/2, 14], 'line_length': 8.3,
         'weights': [0.8, 0.1, 0.1]
     }
     constraints_cfg = {'x_range': DEVICE_X_BOUNDS, 'penalty_weight': 1000.0}
     
     # --- c. 定义 *所有* 参数的完整边界 ---
     up_offset_bounds = [(0, 15)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
-    down_offset_bounds = [(0, 15)] * NUM_DOWN_CONTROL_POINTS
+    down_offset_bounds = [(-0.3, 0.3)] * NUM_DOWN_CONTROL_POINTS
     light_bounds = [(-3.6,-1), (-0.33, 0.33), (0, 1),  (0, 1)]
     full_bounds = up_offset_bounds + down_offset_bounds + light_bounds
 
     # --- d. 参数冻结配置 ---
-    up_active_mask = [True] * NUM_UP_CONTROL_POINTS
+    up_active_mask = [False] * NUM_UP_CONTROL_POINTS
     down_active_mask = [True] * NUM_DOWN_CONTROL_POINTS
-    light_active_mask = [True, True, True, True]
+    light_active_mask = [False, True, True, True]
     active_params_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
     
     # --- e. 优化器超参数 ---
-    max_generations = 100000 
+    max_generations = 1000 
     popsize_multiplier = 20
     
     # =========================================================================
@@ -206,14 +206,14 @@ if __name__ == '__main__':
             print(f"--> 加载文件 '{PARAMS_FILE}' 出错: {e}。将使用默认起点。")
             # 出错则回退到默认值
             control_x_up = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
-            base_up_y = 39.54 - control_x_up
+            base_up_y = 13
             base_down_y = np.zeros(NUM_DOWN_CONTROL_POINTS)
             initial_light_params = initial_light_params_defaults
 
     else:
         print(f"--> 未找到 '{PARAMS_FILE}'。将使用默认的硬编码基准线作为起点。")
         control_x_up = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
-        base_up_y = 39.54 - control_x_up
+        base_up_y = 13
         base_down_y = np.zeros(NUM_DOWN_CONTROL_POINTS)
         initial_light_params = initial_light_params_defaults
 
