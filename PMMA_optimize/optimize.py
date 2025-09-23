@@ -135,11 +135,11 @@ if __name__ == '__main__':
     # --- a. 文件与几何配置 ---
     NUM_UP_CONTROL_POINTS = 3  # <-- 您可以修改这里的数量来进行维度扩展
     NUM_DOWN_CONTROL_POINTS = 3
-    DEVICE_X_BOUNDS = [0, 15.2]
+    DEVICE_X_BOUNDS = [0, 15]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3_8.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_8.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/0922/optimization_result_3_9.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_9.npz'
     
     # ... 其他配置保持不变 ...
     initial_light_params_defaults = [-1, 0, 0.5, 0.5]
@@ -162,7 +162,7 @@ if __name__ == '__main__':
     active_params_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
     
     # --- e. 优化器超参数 ---
-    max_generations = 1000
+    max_generations = 100000 
     popsize_multiplier = 20
     
     # =========================================================================
