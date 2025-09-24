@@ -143,7 +143,7 @@ def generate_device_stl_from_npz(npz_path, stl_path, x_range, y_range, resolutio
     print("✅ 光源三维坐标计算完成。")
     
     return light_sources_world_pos
-def calculate_light_sources_from_params(a, l1, l2, l3):
+def calculate_light_sources_from_params(a, l1):
     """
     【2D版本】根据一个固定的y坐标'a'和三个相对位置参数，计算三个光源的位置和姿态。
 
@@ -152,12 +152,11 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     :param l1: 中间光源在水平线段上的位置比例。范围[-1, 1]。
               -1代表左端点, 0代表中心点, 1代表右端点。
     :param l2: 左侧光源的位置比例。插值区间为 [距离中间光源1.8mm的左锚点] 到 [线段左端点]。范围[0, 1]。
-    :param l3: 右侧光源的位置比例。插值区间为 [距离中间光源1.8mm的右锚点] 到 [线段右端点]。范围[0, 1]。
     :return: light_sources_config_2d 列表
     """
     # --- a. 定义光源所在的水平线段 ---
     # x 范围与之前的矩形边界保持一致
-    x_bounds = {'x_min': 0, 'x_max': 8.3}
+    x_bounds = {'x_min': 8-5.5, 'x_max': 8+5.5}
     
     # 线段的左右端点，y坐标由参数'a'直接决定
     p_start = np.array([x_bounds['x_min'], a])
@@ -172,7 +171,7 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     # ####################################################################
     
     # 1. 根据 l1 计算中间光源的位置
-    pos_middle = segment_center + l1 * segment_half_vector
+    pos_middle = segment_center
     
     # 2. 计算左右两个新的“锚点”，它们是插值的起点
     # 因为是在水平线上，单位向量非常简单
@@ -184,13 +183,13 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     p_right_anchor = pos_middle + 1.8 * np.array([1.0, 0.0])
 
     # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
-    pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
+    pos_left = p_left_anchor + l1 * (p_start - p_left_anchor)
     
     # 4. 根据 l3，在新的“右锚点”和“右端点(p_end)”之间进行线性插值
-    pos_right = p_right_anchor + l3 * (p_end - p_right_anchor)
+    pos_right = p_right_anchor + l1 * (p_end - p_right_anchor)
     
     # 5. 组合并塑形
-    positions_2d = [pos_left, pos_middle, pos_right]
+    positions_2d = [pos_left, pos_right]
     positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
 
     # ####################################################################
@@ -362,7 +361,7 @@ class LC_device(OptElement):
         使用三次样条插值来定义和计算光学器件表面。
         """
         super().__init__(**kwargs)
-        self.n1, self.n2, self.n3 = 1.0, 1.51, 1.0
+        self.n1, self.n2, self.n3 = 1.0, 1.16, 1.49
         self.bound = bound
         
         # 1. 分别为上下表面定义控制点的 x 坐标
@@ -446,7 +445,7 @@ class LC_device(OptElement):
         
         # 3. First Filtering: Based on boundary of the lower surface
         pl1_filtered, (pl0_filtered, n1_filtered), _ = filter_rays_by_boundary(
-            pl1_bcs, (self.bound[0], self.bound[1]), pl0_bcs, n1_bcs
+            pl1_bcs, (self.bound[0]+3.85, self.bound[1]-3.85), pl0_bcs, n1_bcs
         )
         if pl1_filtered.shape[1] == 0:
             return [np.empty((2, 0))] * 4

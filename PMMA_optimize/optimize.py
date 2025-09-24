@@ -133,62 +133,71 @@ if __name__ == '__main__':
     print("Step 1: 正在设置优化问题的配置...")
 
     # --- a. 文件与几何配置 ---
-    NUM_UP_CONTROL_POINTS = 18  # <-- 您可以修改这里的数量来进行维度扩展
-    NUM_DOWN_CONTROL_POINTS = 18
-    DEVICE_X_BOUNDS = [0, 8.3]
+    NUM_UP_CONTROL_POINTS = 7  # <-- 推荐使用奇数以方便对称
+    NUM_DOWN_CONTROL_POINTS = 7 # <-- 推荐使用奇数以方便对称
+    DEVICE_X_BOUNDS = [0, 16]
     
-    # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/0923/optimization_result_9_5.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0923/optimization_result_{NUM_UP_CONTROL_POINTS}_5.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/0924/optimization_result_7_17.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0924/optimization_result_{NUM_UP_CONTROL_POINTS}_17.npz'
     
-    # ... 其他配置保持不变 ...
-    initial_light_params_defaults = [-1.52565719, 0, 0.5, 0.5]
-    evaluator_config = {
-        'line_normal': [0, 1], 'line_center': [8.3/2, 14], 'line_length': 8.3,
-        'weights': [0.8, 0.1, 0.1]
+    ENFORCE_SYMMETRY = True  # <-- 总开关：是否强制曲面左右对称
+
+    # --- b. 光源与评估器配置 ---
+    initial_light_params_defaults = [-2.557, 0.5] # y坐标, l1
+    evaluator_config = { 
+        'line_normal': [0, 1], 'line_center': [DEVICE_X_BOUNDS[1]/2, 19], 'line_length': 16, 
+        'weights': [0.8, 0.1, 0.1] # 平行度, 均匀性, 覆盖度
     }
     constraints_cfg = {'x_range': DEVICE_X_BOUNDS, 'penalty_weight': 1000.0}
     
     # --- c. 定义 *所有* 参数的完整边界 ---
-    up_offset_bounds = [(0, 15)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
-    down_offset_bounds = [(-0.3, 0.3)] * NUM_DOWN_CONTROL_POINTS
-    light_bounds = [(-3.6,-1), (-0.33, 0.33), (0, 1),  (0, 1)]
+    up_offset_bounds = [(-3, 5)] * NUM_UP_CONTROL_POINTS #上表面边界
+    down_offset_bounds = [(0, 5)] * NUM_DOWN_CONTROL_POINTS #下表面边界
+    light_bounds = [(-3.6, -1), (0, 1)]
     full_bounds = up_offset_bounds + down_offset_bounds + light_bounds
 
-    # --- d. 参数冻结配置 ---
-    up_active_mask = [False] * NUM_UP_CONTROL_POINTS
+    # --- d. 参数冻结配置 (作用于对称/非对称模式) ---
+    # True = 参与优化 (Active), False = 冻结 (Frozen)
+    up_active_mask = [True] * NUM_UP_CONTROL_POINTS
     down_active_mask = [True] * NUM_DOWN_CONTROL_POINTS
-    light_active_mask = [False, True, True, True]
-    active_params_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
+    light_active_mask = [False, True] # 示例：冻结所有光源参数
+
+    full_active_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
     
     # --- e. 优化器超参数 ---
-    max_generations = 1000 
+    max_generations = 10000
     popsize_multiplier = 20
     
     # =========================================================================
-    #  ✅ Step 2: 初始化参数 (新功能：加载基准线 或 默认生成)
+    #  ✅ Step 2: 初始化参数 (加载基准线 或 默认生成)
     # =========================================================================
     print("\nStep 2: 正在初始化优化起点...")
     
-    # 【新逻辑】定义当前运行的基准线，它可能来自文件，也可能来自默认值
+    # 定义基准线
+    base_down_y = 3.65 #下表面初始形状
+    control_x_up = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
+    base_up_y = 16 # 上表面初始形状
+
+    expected_len = NUM_UP_CONTROL_POINTS + NUM_DOWN_CONTROL_POINTS + len(light_bounds)
+
     if os.path.exists(PARAMS_FILE):
         try:
             print(f"--> 成功从 '{PARAMS_FILE}' 加载上次的优化结果作为新基准。")
             data = np.load(PARAMS_FILE)
             loaded_up_y = data['up_y_coords']
             loaded_down_y = data['down_y_coords']
-            loaded_num_up = data['num_up']
-            loaded_num_down = data['num_down']
+            loaded_num_up = int(data['num_up'])
+            loaded_num_down = int(data['num_down'])
 
-            # 【新逻辑】如果控制点数量发生变化，则通过插值扩展基准线
+            # 如果控制点数量发生变化，则通过插值扩展基准线
             if loaded_num_up != NUM_UP_CONTROL_POINTS:
                 print(f"--> 上表面维度不匹配，正在从 {loaded_num_up} 点插值为 {NUM_UP_CONTROL_POINTS} 点...")
                 old_control_x = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], loaded_num_up)
                 temp_spline = CubicSpline(old_control_x, loaded_up_y)
                 new_control_x = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
-                base_up_y = temp_spline(new_control_x) # 插值生成新的基准线
+                base_up_y = temp_spline(new_control_x)
             else:
-                base_up_y = loaded_up_y # 维度未变，直接使用
+                base_up_y = loaded_up_y
 
             if loaded_num_down != NUM_DOWN_CONTROL_POINTS:
                 print(f"--> 下表面维度不匹配，正在从 {loaded_num_down} 点插值为 {NUM_DOWN_CONTROL_POINTS} 点...")
@@ -199,53 +208,69 @@ if __name__ == '__main__':
             else:
                 base_down_y = loaded_down_y
 
-            # 光源参数直接继承
             initial_light_params = data.get('light_params', initial_light_params_defaults)
-            
         except Exception as e:
             print(f"--> 加载文件 '{PARAMS_FILE}' 出错: {e}。将使用默认起点。")
-            # 出错则回退到默认值
-            control_x_up = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
-            base_up_y = 13
-            base_down_y = np.zeros(NUM_DOWN_CONTROL_POINTS)
             initial_light_params = initial_light_params_defaults
-
     else:
         print(f"--> 未找到 '{PARAMS_FILE}'。将使用默认的硬编码基准线作为起点。")
-        control_x_up = np.linspace(DEVICE_X_BOUNDS[0], DEVICE_X_BOUNDS[1], NUM_UP_CONTROL_POINTS)
-        base_up_y = 13
-        base_down_y = np.zeros(NUM_DOWN_CONTROL_POINTS)
         initial_light_params = initial_light_params_defaults
 
-    # 【新逻辑】无论起点如何，本轮优化的初始偏移量都清零
+    # 本轮优化的初始偏移量都清零
     initial_up_offsets = np.zeros(NUM_UP_CONTROL_POINTS)
     initial_down_offsets = np.zeros(NUM_DOWN_CONTROL_POINTS)
-    
-    # 完整的初始参数向量（优化器看到的）总是由零偏移量和光源参数构成
     full_initial_params_vec = np.concatenate([initial_up_offsets, initial_down_offsets, initial_light_params])
     
     # =========================================================================
-    #  ✅ Step 3: 准备优化 (处理冻结参数等)
+    #  ✅ Step 3: 准备优化 (处理对称与冻结)
     # =========================================================================
     
-    active_bounds = [b for i, b in enumerate(full_bounds) if active_params_mask[i]]
-    initial_active_params = full_initial_params_vec[active_params_mask]
-
     # 实例化核心组件
     evaluator = PlanarLossEvaluator(**evaluator_config)
-    device_static_config = {
-        'num_up_control_points': NUM_UP_CONTROL_POINTS,
-        'num_down_control_points': NUM_DOWN_CONTROL_POINTS,
-        'bound': DEVICE_X_BOUNDS,
-        'base_up_y_line': base_up_y, # <-- 传入本轮的最终基准线
-        'base_down_y_line': base_down_y,
-    }
+    device_static_config = {'num_up_control_points': NUM_UP_CONTROL_POINTS, 'num_down_control_points': NUM_DOWN_CONTROL_POINTS, 'bound': DEVICE_X_BOUNDS, 'base_up_y_line': base_up_y, 'base_down_y_line': base_down_y}
     objective_func = Objective(LC_device, Point_light_source, evaluator, device_static_config, constraints_cfg)
 
-    def wrapped_objective_func(active_params):
-        full_params = full_initial_params_vec.copy()
-        full_params[active_params_mask] = active_params
-        return objective_func(full_params)
+    # --- 包装目标函数以处理对称和冻结 ---
+    if ENFORCE_SYMMETRY and NUM_UP_CONTROL_POINTS % 2 != 0 and NUM_DOWN_CONTROL_POINTS % 2 != 0:
+        print("--> 已启用对称约束：将只优化一半的曲面控制点。")
+        num_unique_up = (NUM_UP_CONTROL_POINTS + 1) // 2
+        num_unique_down = (NUM_DOWN_CONTROL_POINTS + 1) // 2
+
+        # 提取独立参数的掩码、边界和初始值
+        up_active_unique_mask = up_active_mask[:num_unique_up]
+        down_active_unique_mask = down_active_mask[:num_unique_down]
+        active_unique_mask = np.concatenate([up_active_unique_mask, down_active_unique_mask, light_active_mask])
+        
+        unique_bounds = up_offset_bounds[:num_unique_up] + down_offset_bounds[:num_unique_down] + light_bounds
+        active_bounds = [b for i, b in enumerate(unique_bounds) if active_unique_mask[i]]
+
+        initial_unique_params = np.concatenate([initial_up_offsets[:num_unique_up], initial_down_offsets[:num_unique_down], initial_light_params])
+        initial_active_params = initial_unique_params[active_unique_mask]
+
+        def wrapped_objective_func(active_unique_params):
+            full_params = full_initial_params_vec.copy()
+            # 重新构造完整的、对称的、且包含冻结值的参数向量
+            temp_unique_params = initial_unique_params.copy()
+            temp_unique_params[active_unique_mask] = active_unique_params
+            
+            unique_up, unique_down, light_p = np.split(temp_unique_params, [num_unique_up, num_unique_up + num_unique_down])
+            
+            full_up_offsets = np.concatenate([unique_up, np.flip(unique_up[:-1])])
+            full_down_offsets = np.concatenate([unique_down, np.flip(unique_down[:-1])])
+            
+            full_params = np.concatenate([full_up_offsets, full_down_offsets, light_p])
+            return objective_func(full_params)
+    else:
+        if ENFORCE_SYMMETRY:
+            print("--> 警告：控制点数量为偶数，对称约束未启用。")
+        print("--> 未启用对称约束：将优化所有活动参数。")
+        active_bounds = [b for i, b in enumerate(full_bounds) if full_active_mask[i]]
+        initial_active_params = full_initial_params_vec[full_active_mask]
+        
+        def wrapped_objective_func(active_params):
+            full_params = full_initial_params_vec.copy()
+            full_params[full_active_mask] = active_params
+            return objective_func(full_params)
     
     # =========================================================================
     #  Step 4: 优化前可视化
@@ -294,20 +319,33 @@ if __name__ == '__main__':
     pbar.close()
 
     # =========================================================================
-    #  Step 6: 优化后结果打印、保存与可视化
+    #  ✅ Step 6: 优化后结果打印、保存与可视化
     # =========================================================================
     
-    # --- a. 重构完整的最终偏移量参数向量 ---
+    # --- a. 重构完整的最终参数向量 ---
     final_full_params = full_initial_params_vec.copy()
-    final_full_params[active_params_mask] = result.x
+
+    if ENFORCE_SYMMETRY and NUM_UP_CONTROL_POINTS % 2 != 0 and NUM_DOWN_CONTROL_POINTS % 2 != 0:
+        # result.x 是优化后的独立活动参数短向量
+        temp_unique_params = initial_unique_params.copy()
+        temp_unique_params[active_unique_mask] = result.x
+        
+        unique_up_res, unique_down_res, light_res = np.split(temp_unique_params, [num_unique_up, num_unique_up + num_unique_down])
+        
+        final_up_offsets = np.concatenate([unique_up_res, np.flip(unique_up_res[:-1])])
+        final_down_offsets = np.concatenate([unique_down_res, np.flip(unique_down_res[:-1])])
+        final_light_params = light_res
+        
+        final_full_params = np.concatenate([final_up_offsets, final_down_offsets, final_light_params])
+    else:
+        final_full_params[full_active_mask] = result.x
 
     # --- b. 从最终的偏移量计算出最终的绝对Y坐标 ---
     final_up_offsets, final_down_offsets, final_light_params = np.split(final_full_params, [NUM_UP_CONTROL_POINTS, NUM_UP_CONTROL_POINTS + NUM_DOWN_CONTROL_POINTS])
-    
     final_up_y_coords = base_up_y - final_up_offsets
     final_down_y_coords = base_down_y + final_down_offsets
     
-    # --- c. 【新逻辑】保存本次优化的最终【绝对曲线坐标】和维度信息 ---
+    # --- c. 保存本次优化的最终【绝对曲线坐标】和维度信息 ---
     output_dir = os.path.dirname(OUTPUT_PARAMS_FILE)
     if not os.path.exists(output_dir) and output_dir:
         os.makedirs(output_dir)

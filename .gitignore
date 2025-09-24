@@ -2,3 +2,5 @@ data
 PMMA_optimize/utils/__pycache__
 PMMA_optimize/output
 test
+test_refractive_index.py
+utils
