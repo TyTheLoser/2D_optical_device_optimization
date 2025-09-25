@@ -138,11 +138,11 @@ if __name__ == '__main__':
     DEVICE_X_BOUNDS = [0, 15]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/侧壁优化最终结果.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0922/optimization_result_{NUM_UP_CONTROL_POINTS}_9.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/0924/侧壁_optimization_result_3_5.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0924/侧壁_optimization_result_{NUM_UP_CONTROL_POINTS}_5.npz'
     
     # ... 其他配置保持不变 ...
-    initial_light_params_defaults = [-1, 0, 0.5, 0.5]
+    initial_light_params_defaults = [-2.557, 0, 0.5, 0.5]
     evaluator_config = {
         'line_normal': [1, 0], 'line_center': [0, 29], 'line_length': 20.0,
         'weights': [0.8, 0.1, 0.1]
@@ -150,15 +150,15 @@ if __name__ == '__main__':
     constraints_cfg = {'x_range': DEVICE_X_BOUNDS, 'penalty_weight': 1000.0}
     
     # --- c. 定义 *所有* 参数的完整边界 ---
-    up_offset_bounds = [(0, 15)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
-    down_offset_bounds = [(0, 15)] * NUM_DOWN_CONTROL_POINTS
+    up_offset_bounds = [(0, 20)] * NUM_UP_CONTROL_POINTS      # 偏移量的搜索范围可以设置得小一些
+    down_offset_bounds = [(0, 19)] * NUM_DOWN_CONTROL_POINTS
     light_bounds = [(-3.6,-1), (-0.33, 0.33), (0, 1),  (0, 1)]
     full_bounds = up_offset_bounds + down_offset_bounds + light_bounds
 
     # --- d. 参数冻结配置 ---
     up_active_mask = [True] * NUM_UP_CONTROL_POINTS
     down_active_mask = [True] * NUM_DOWN_CONTROL_POINTS
-    light_active_mask = [True, True, True, True]
+    light_active_mask = [False, True, True, True]
     active_params_mask = np.array(up_active_mask + down_active_mask + light_active_mask)
     
     # --- e. 优化器超参数 ---

@@ -362,7 +362,7 @@ class LC_device(OptElement):
         使用三次样条插值来定义和计算光学器件表面。
         """
         super().__init__(**kwargs)
-        self.n1, self.n2, self.n3 = 1.0, 1.51, 1.0
+        self.n1, self.n2, self.n3 = 1.0, 1.16, 1.0
         self.bound = bound
         
         # 1. 分别为上下表面定义控制点的 x 坐标
