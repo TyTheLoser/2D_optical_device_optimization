@@ -260,7 +260,11 @@ if __name__ == '__main__':
         'num_control_points_up': NUM_UP_CONTROL_POINTS,
         'num_control_points_down': NUM_DOWN_CONTROL_POINTS
     }
-    setup_and_visualize(ax_before, "Before Optimize", initial_device_params, light_params, evaluator)
+    plot_title = ( 
+        f"Before Optimize\n"    
+        f"loss: {wrapped_objective_func(initial_active_params):.4f}"    
+    )
+    setup_and_visualize(ax_before, plot_title, initial_device_params, light_params, evaluator)
     plt.show()
 
     # =========================================================================
