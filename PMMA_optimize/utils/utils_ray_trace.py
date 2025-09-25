@@ -143,7 +143,7 @@ def generate_device_stl_from_npz(npz_path, stl_path, x_range, y_range, resolutio
     print("✅ 光源三维坐标计算完成。")
     
     return light_sources_world_pos
-def calculate_light_sources_from_params(a, l1):
+def calculate_light_sources_from_params(a, l1, l2):
     """
     【2D版本】根据一个固定的y坐标'a'和三个相对位置参数，计算三个光源的位置和姿态。
 
@@ -171,7 +171,7 @@ def calculate_light_sources_from_params(a, l1):
     # ####################################################################
     
     # 1. 根据 l1 计算中间光源的位置
-    pos_middle = segment_center
+    pos_middle = segment_center + l1 * segment_half_vector
     
     # 2. 计算左右两个新的“锚点”，它们是插值的起点
     # 因为是在水平线上，单位向量非常简单
@@ -183,13 +183,13 @@ def calculate_light_sources_from_params(a, l1):
     p_right_anchor = pos_middle + 1.8 * np.array([1.0, 0.0])
 
     # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
-    pos_left = p_left_anchor + l1 * (p_start - p_left_anchor)
+    pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
     
     # 4. 根据 l3，在新的“右锚点”和“右端点(p_end)”之间进行线性插值
-    pos_right = p_right_anchor + l1 * (p_end - p_right_anchor)
+    pos_right = p_right_anchor + l2 * (p_end - p_right_anchor)
     
     # 5. 组合并塑形
-    positions_2d = [pos_left, pos_right]
+    positions_2d = [pos_left,pos_middle, pos_right]
     positions_2d_col = [pos.reshape(2, 1) for pos in positions_2d]
 
     # ####################################################################
