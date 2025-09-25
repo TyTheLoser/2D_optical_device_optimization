@@ -22,7 +22,7 @@ class Objective:
         """
         构造函数更新：存储静态配置，包括基准线。
         """
-        self.lc_class = device_class
+        self.lc_class =  device_class
         self.light_source_class = light_source_class
         self.loss_evaluator = loss_evaluator
         
