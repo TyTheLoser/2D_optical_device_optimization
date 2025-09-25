@@ -137,7 +137,7 @@ if __name__ == '__main__':
     NUM_DOWN_CONTROL_POINTS = 7 # <-- 推荐使用奇数以方便对称
     DEVICE_X_BOUNDS = [0, 16]
     
-    PARAMS_FILE = 'PMMA_optimize/output/0924/optimization_result_7_17.npz' 
+    PARAMS_FILE = 'PMMA_optimize/output/底面优化最终结果_1.16.npz' 
     OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/0924/optimization_result_{NUM_UP_CONTROL_POINTS}_17.npz'
     
     ENFORCE_SYMMETRY = True  # <-- 总开关：是否强制曲面左右对称
@@ -285,7 +285,11 @@ if __name__ == '__main__':
         'num_control_points_up': NUM_UP_CONTROL_POINTS,
         'num_control_points_down': NUM_DOWN_CONTROL_POINTS
     }
-    setup_and_visualize(ax_before, "Before Optimize", initial_device_params, light_params, evaluator)
+    plot_title = ( 
+        f"Before Optimize\n"    
+        f"loss: {wrapped_objective_func(initial_active_params):.4f}"    
+    )
+    setup_and_visualize(ax_before, plot_title, initial_device_params, light_params, evaluator)
     plt.show()
 
     # =========================================================================
