@@ -41,7 +41,7 @@ class Objective:
 
     def _calculate_thickness_penalty(self, device):
         y_up, y_down = device.up_surface_fun(self.x_samples), device.down_surface_fun(self.x_samples)
-        y_up_limit=40-self.x_samples
+        y_up_limit=19
         p1 = self.penalty_weight * np.maximum(0, -np.min(y_up - y_down))**2
         p2 = self.penalty_weight * np.maximum(0, -np.min(y_down - 0))**2 # 假设下表面y>0
         p3 = self.penalty_weight * np.maximum(0, np.max(y_up - y_up_limit))**2 # 假设上表面y<40
@@ -137,7 +137,7 @@ if __name__ == '__main__':
     NUM_DOWN_CONTROL_POINTS = 7 # <-- 推荐使用奇数以方便对称
     DEVICE_X_BOUNDS = [0, 16]
     
-    PARAMS_FILE = 'PMMA_optimize/output/bottom_3_lights_116_7_BEST.npz' 
+    PARAMS_FILE = 'PMMA_optimize/output/底面优化最终结果_6442.npz' 
     OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/1011/bottom_3_lights_116_{NUM_UP_CONTROL_POINTS}_0.npz'
     
     ENFORCE_SYMMETRY = True  # <-- 总开关：是否强制曲面左右对称
