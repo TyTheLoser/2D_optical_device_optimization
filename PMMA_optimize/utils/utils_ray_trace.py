@@ -177,10 +177,10 @@ def calculate_light_sources_from_params(a, l1, l2):
     # 因为是在水平线上，单位向量非常简单
     
     # 朝向左端点(p_start)的单位向量是 [-1, 0]
-    p_left_anchor = pos_middle + 2.6 * np.array([-1.0, 0.0])
+    p_left_anchor = pos_middle + 2.654 * np.array([-1.0, 0.0])
 
     # 朝向右端点(p_end)的单位向量是 [1, 0]
-    p_right_anchor = pos_middle + 2.6* np.array([1.0, 0.0])
+    p_right_anchor = pos_middle + 2.654* np.array([1.0, 0.0])
 
     # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
     pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
