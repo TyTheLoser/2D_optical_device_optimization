@@ -138,8 +138,8 @@ if __name__ == '__main__':
     DEVICE_X_BOUNDS = [0, 15]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/侧壁_optimization_result_3_0.npz' 
-    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/侧壁_optimization_result_{NUM_UP_CONTROL_POINTS}_0.npz'
+    PARAMS_FILE = 'PMMA_optimize/output/侧壁优化最终结果_1.49.npz' 
+    OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/1011/侧壁_optimization_result_{NUM_UP_CONTROL_POINTS}_0.npz'
     
     # ... 其他配置保持不变 ...
     initial_light_params_defaults = [-2.557, 0, 0.5, 0.5]

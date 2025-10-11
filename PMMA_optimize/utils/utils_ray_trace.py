@@ -157,7 +157,7 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     """
     # --- a. 定义光源所在的水平线段 ---
     # x 范围与之前的矩形边界保持一致
-    x_bounds = {'x_min': 2.8, 'x_max': 11.66}
+    x_bounds = {'x_min': 0, 'x_max': 10.8}
     
     # 线段的左右端点，y坐标由参数'a'直接决定
     p_start = np.array([x_bounds['x_min'], a])
@@ -178,10 +178,10 @@ def calculate_light_sources_from_params(a, l1, l2, l3):
     # 因为是在水平线上，单位向量非常简单
     
     # 朝向左端点(p_start)的单位向量是 [-1, 0]
-    p_left_anchor = pos_middle + 1.8 * np.array([-1.0, 0.0])
+    p_left_anchor = pos_middle + 2.6 * np.array([-1.0, 0.0])
 
     # 朝向右端点(p_end)的单位向量是 [1, 0]
-    p_right_anchor = pos_middle + 1.8 * np.array([1.0, 0.0])
+    p_right_anchor = pos_middle + 2.6 * np.array([1.0, 0.0])
 
     # 3. 根据 l2，在新的“左锚点”和“左端点(p_start)”之间进行线性插值
     pos_left = p_left_anchor + l2 * (p_start - p_left_anchor)
