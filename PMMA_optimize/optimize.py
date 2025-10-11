@@ -138,7 +138,7 @@ if __name__ == '__main__':
     DEVICE_X_BOUNDS = [0, 15]
     
     # 定义用于加载和保存的文件名
-    PARAMS_FILE = 'PMMA_optimize/output/侧壁优化最终结果_1.49.npz' 
+    PARAMS_FILE = 'PMMA_optimize/output/side_3_lights_116_3_BEST.npz' 
     OUTPUT_PARAMS_FILE = f'PMMA_optimize/output/1011/侧壁_optimization_result_{NUM_UP_CONTROL_POINTS}_0.npz'
     
     # ... 其他配置保持不变 ...
