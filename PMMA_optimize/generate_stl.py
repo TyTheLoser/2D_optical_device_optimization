@@ -1,7 +1,7 @@
 from utils.utils_ray_trace import generate_device_stl_from_npz
 # --- 2. 调用核心函数 ---
-output_stl_file = 'PMMA_optimize/output/bottom_3_lights_116_7_BEST.stl'
-demo_npz_file = 'PMMA_optimize/output/bottom_3_lights_116_7_BEST.npz'
+output_stl_file = 'PMMA_optimize/output/底面优化最终结果_6442.stl'
+demo_npz_file = 'PMMA_optimize/output/底面优化最终结果_6442.npz'
 device_x_range = (0, 16)
 device_y_range = (0, 10) # 定义器件的宽度
 
